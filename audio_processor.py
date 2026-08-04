@@ -557,11 +557,10 @@ def record_and_transcribe(model):
         print("\n[알림] 녹음된 오디오가 없습니다.")
         return
 
-    print(f"\n[+] 모든 녹화 파일 저장 완료. 생성된 파일 총 {len(saved_file_paths)}개")
-    
-    for file_path in saved_file_paths:
-        print(f"\n--- [파일 처리 시작] {os.path.basename(file_path)} ---")
-        execute_analysis_flow(model, file_path)
+    # 💡 녹화 직후 자동 분석 실행 루프를 제거하고 저장 완료 메시지만 출력 후 메뉴로 복귀하도록 수정
+    print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
+    print(f"[*] 저장 위치: {AUTO_REC_DIR}/")
+    print("[*] 2번 메뉴(파일 분석)에서 저장된 파일을 선택하여 분석 모드를 진행해 주세요.")
 
 def select_and_process_audio_file(model):
     ensure_directories()
