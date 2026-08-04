@@ -14,7 +14,7 @@ def load_existing_profiles():
         return []
     return [os.path.splitext(f)[0] for f in os.listdir(STORAGE_DIR) if f.endswith(".json")]
 
-def register_or_update_algorithm(algo_name, audio_path, corrected_text):
+def register_or_update_algorithm(algo_name, audio_path, corrected_text, raw_stt_text=""):
     ensure_handler_directories()
     
     y, sr = librosa.load(audio_path, sr=None)
@@ -33,16 +33,23 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text):
     else:
         algo_data = {
             "algo_name": algo_name,
-            "samples": []
+            "samples": [],
+            "correction_dictionary": {}
         }
 
     new_sample = {
         "mean_pitch": mean_pitch,
         "min_pitch": min_pitch,
         "max_pitch": max_pitch,
-        "corrected_text": corrected_text
+        "corrected_text": corrected_text,
+        "raw_stt_text": raw_stt_text
     }
     algo_data["samples"].append(new_sample)
+
+    if raw_stt_text and corrected_text and raw_stt_text != corrected_text:
+        if "correction_dictionary" not in algo_data:
+            algo_data["correction_dictionary"] = {}
+        algo_data["correction_dictionary"][raw_stt_text.strip()] = corrected_text.strip()
 
     all_mins = [s["min_pitch"] for s in algo_data["samples"] if s["min_pitch"] > 0]
     all_maxs = [s["max_pitch"] for s in algo_data["samples"] if s["max_pitch"] > 0]
@@ -58,7 +65,39 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text):
         
     return True
 
-def verify_pitch_match(algo_name, audio_path, tolerance=30.0):
+def apply_text_corrections(text, algo_name):
+    if not text or not algo_name:
+        return text
+        
+    file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
+    if not os.path.exists(file_path):
+        return text
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            algo_data = json.load(f)
+            
+        corr_dict = algo_data.get("correction_dictionary", {})
+        if not corr_dict:
+            return text
+
+        processed_text = text.strip()
+        if processed_text in corr_dict:
+            return corr_dict[processed_text]
+
+        for raw_pattern, fixed_pattern in corr_dict.items():
+            if raw_pattern and raw_pattern in processed_text:
+                processed_text = processed_text.replace(raw_pattern, fixed_pattern)
+                
+        return processed_text
+    except Exception:
+        return text
+
+def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_ratio=0.3):
+    """
+    노이즈나 이종 음성이 섞여 있더라도 전체 피치 중 일정 비율(required_ratio) 이상이 
+    허용 오차 범위 내에 포함되면 유연하게 일치하는 것으로 판정합니다.
+    """
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     if not os.path.exists(file_path):
         return False
@@ -75,24 +114,34 @@ def verify_pitch_match(algo_name, audio_path, tolerance=30.0):
     pitch_values = pitches[pitches > 0]
     if len(pitch_values) == 0:
         return False
-    target_mean_pitch = np.mean(pitch_values)
 
     min_p = global_range["min"] - tolerance
     max_p = global_range["max"] + tolerance
 
-    return min_p <= target_mean_pitch <= max_p
+    # 허용 범위 내에 속하는 피치 포인트의 비율 계산
+    matching_points = np.sum((pitch_values >= min_p) & (pitch_values <= max_p))
+    match_ratio = float(matching_points) / float(len(pitch_values))
+
+    # 설정된 비율 이상이거나, 전체 평균 피치가 범위 내에 들어오면 통과
+    mean_pitch = np.mean(pitch_values)
+    is_mean_in_range = (global_range["min"] - tolerance <= mean_pitch <= global_range["max"] + tolerance)
+
+    return (match_ratio >= required_ratio) or is_mean_in_range
 
 def verify_single_speaker(algo_name, audio_path):
-    return verify_pitch_match(algo_name, audio_path)
+    return verify_pitch_match_flexible(algo_name, audio_path)
 
 def verify_multi_speakers_auto(audio_path):
+    """
+    다중 화자 자동 검증: 등록된 프로파일 중 하나라도 유연한 피치 매칭 조건을 만족하면 통과합니다.
+    """
     existing_profiles = load_existing_profiles()
     if not existing_profiles:
         return False, "등록된 알고리즘 프로파일이 없습니다."
 
     matched_any = False
     for algo_name in existing_profiles:
-        if verify_pitch_match(algo_name, audio_path):
+        if verify_pitch_match_flexible(algo_name, audio_path):
             matched_any = True
             break
 
@@ -112,9 +161,19 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
         wav_path = os.path.join(folder_path, wav)
         base_name = os.path.splitext(wav)[0]
         txt_path = os.path.join(folder_path, f"{base_name}.txt")
+        raw_txt_path = os.path.join(folder_path, f"{base_name}.raw_txt")
+        
         corrected_text = ""
         if os.path.exists(txt_path):
             with open(txt_path, "r", encoding="utf-8") as tf:
                 corrected_text = tf.read().strip()
-        register_or_update_algorithm(algo_name, wav_path, corrected_text)
+                
+        raw_stt_text = ""
+        if os.path.exists(raw_txt_path):
+            with open(raw_txt_path, "r", encoding="utf-8") as rtf:
+                raw_stt_text = rtf.read().strip()
+        else:
+            raw_stt_text = corrected_text
+
+        register_or_update_algorithm(algo_name, wav_path, corrected_text, raw_stt_text=raw_stt_text)
     return True

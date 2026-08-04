@@ -23,7 +23,6 @@ def get_basic_segment_folders():
     folders = []
     for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
         for d in dirs:
-            # 다중 화자(seg_multi)를 제외한 기존 기본 분석 형태의 세그먼트 폴더 허용
             if d.startswith("세그먼트") and not d.startswith("seg_multi"):
                 rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
                 folders.append(rel_path)
@@ -48,7 +47,6 @@ def run_data_refinement_webui():
 
         gr.Markdown("💡 **안내:** 단일 화자 세그먼트 또는 기본 분석 세그먼트 중 작업할 폴더를 선택하여 불러오세요. (다중 화자는 원천 차단됩니다)")
 
-        # 폴더 선택 영역을 두 개로 분리
         with gr.Row(variant="panel"):
             with gr.Column():
                 gr.Markdown("### 🎤 단일 화자 분석 폴더 선택")
@@ -307,7 +305,6 @@ def run_data_refinement_webui():
             except Exception as e:
                 return [items, history, redo, f"[오류] 일괄 저장 실패: {e}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))]
 
-        # 새로고침 버튼 동작 (두 드롭다운 모두 갱신)
         refresh_btn.click(
             fn=lambda: (gr.Dropdown(choices=get_single_speaker_folders()), gr.Dropdown(choices=get_basic_segment_folders())),
             outputs=[single_dropdown, basic_dropdown]
@@ -372,7 +369,7 @@ def run_data_refinement_webui():
                 first_txt_path = new_items[0]["txt"] if new_items else None
                 if not first_txt_path: return "[오류] 유효한 폴더 경로를 찾을 수 없습니다."
                 success = ah.register_dataset_from_refined_folder(speaker_name, os.path.dirname(first_txt_path))
-                if success: return f"[🎉 성공] '{speaker_name}' 화자의 알고리즘 등록 및 업데이트(학습) 완료!"
+                if success: return f"[🎉 성공] '{speaker_name}' 화자의 알고리즘 등록 및 텍스트 치환 사전 학습 완료!"
                 return f"[오류] 알고리즘 등록 처리 중 문제가 발생했습니다."
             except Exception as e:
                 return f"[오류] 예외 발생: {e}"
