@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+hf_token.txt
+audio/*
+!audio/.gitkeep
+asr_output/*
+error_log/*
+post_processing/*
+saved_algorithms/*
+segments_base/*
