@@ -356,7 +356,7 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
         else:
             print("[오류] 올바른 번호를 입력해주세요.")
 
-def execute_analysis_flow(model, target_file):
+def execute_analysis_flow(model, target_file, active_speakers, is_single):
     try:
         with wave.open(target_file, 'rb') as wf:
             sr = wf.getframerate()
@@ -370,10 +370,6 @@ def execute_analysis_flow(model, target_file):
     except Exception as e:
         write_error_log("오디오 파일 로드 단계", e)
         print(f"\n[오류] 오디오 파일을 읽어오는 중 문제가 발생했습니다: {e}")
-        return
-
-    active_speakers, is_single = configure_strict_analysis_pipeline(audio_data, TARGET_SAMPLE_RATE)
-    if active_speakers is None:
         return
 
     try:
@@ -550,11 +546,28 @@ def record_and_transcribe(model):
         return
 
     print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
+    
+    # 🔥 첫 번째 파일을 기준으로 샘플레이트/오디오 성향을 확인하여 분석 모드 선택을 단 한 번만 수행
+    with wave.open(saved_file_paths[0], 'rb') as wf:
+        sr = wf.getframerate()
+        n_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        frames = wf.readframes(wf.getnframes())
+        sample_audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
+        if n_channels > 1:
+            sample_audio_data = np.mean(sample_audio_data.reshape(-1, n_channels), axis=1)
+        sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
+
+    active_speakers, is_single = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+    if active_speakers is None:
+        print("[*] 분석이 취소되었습니다.")
+        return
+
     for target_file in saved_file_paths:
         print(f"\n----------------------------------------------")
         print(f"[*] 대상 파일 분석 시작: {target_file}")
         print(f"----------------------------------------------")
-        execute_analysis_flow(model, target_file)
+        execute_analysis_flow(model, target_file, active_speakers, is_single)
 
 def select_and_process_audio_file(model):
     ensure_directories()
@@ -626,12 +639,27 @@ def select_and_process_audio_file(model):
                 print(f"\n[알림] 선택한 폴더 내에 분석할 WAV 파일이 없습니다.")
                 continue
                 
+            # 🔥 자동녹화 폴더 선택 시에도 분석 모드를 최초에 한 번만 물어봄
+            with wave.open(str(session_wavs[0]), 'rb') as wf:
+                sr = wf.getframerate()
+                n_channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                frames = wf.readframes(wf.getnframes())
+                sample_audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
+                if n_channels > 1:
+                    sample_audio_data = np.mean(sample_audio_data.reshape(-1, n_channels), axis=1)
+                sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
+
+            active_speakers, is_single = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+            if active_speakers is None:
+                continue
+
             print(f"\n[+] 총 {len(session_wavs)}개의 분할된 오디오 파일을 순차적으로 분석합니다.")
             for target_file in session_wavs:
                 print(f"\n----------------------------------------------")
                 print(f"[*] 대상 파일 분석 중: {target_file.name}")
                 print(f"----------------------------------------------")
-                execute_analysis_flow(model, str(target_file))
+                execute_analysis_flow(model, str(target_file), active_speakers, is_single)
             break
         else:
             idx_val = choice_val - 1
@@ -639,7 +667,21 @@ def select_and_process_audio_file(model):
                 print("[오류] 올바른 번호를 입력해주세요.")
                 continue
             target_file = normal_files[idx_val]
-            execute_analysis_flow(model, str(target_file))
+            
+            # 단일 일반 파일 선택 시
+            with wave.open(str(target_file), 'rb') as wf:
+                sr = wf.getframerate()
+                n_channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                frames = wf.readframes(wf.getnframes())
+                sample_audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
+                if n_channels > 1:
+                    sample_audio_data = np.mean(sample_audio_data.reshape(-1, n_channels), axis=1)
+                sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
+
+            active_speakers, is_single = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+            if active_speakers is not None:
+                execute_analysis_flow(model, str(target_file), active_speakers, is_single)
             break
 
 if __name__ == "__main__":
