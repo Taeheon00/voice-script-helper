@@ -8,17 +8,19 @@ import threading
 import re
 import warnings
 import logging
+from pathlib import Path
+from datetime import datetime
 
+# 💡 내부 라이브러리 로그 출력 차단
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.*")
 warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
 warnings.filterwarnings("ignore", message=".*triton not found.*")
 logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers.generation.utils").setLevel(logging.ERROR)
 
 import numpy as np
 import torch
-from tqdm import tqdm
-from datetime import datetime
 from qwen_asr import Qwen3ASRModel
 import pyaudiowpatch as pyaudio
 import algorithm_handler as ah
@@ -38,51 +40,31 @@ except ImportError:
 TARGET_SAMPLE_RATE = 16000
 CHUNK_SIZE = 1024
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 DEFAULT_MODEL_PATH = "Qwen/Qwen3-ASR-1.7B"
 
-# 📁 폴더 구조 정의 (사용자 요구사항 반영)
-AUDIO_DIR = "audio"
-MANUAL_UVR5_DIR = os.path.join(AUDIO_DIR, "uvr5")
+AUDIO_DIR = Path("audio")
+MANUAL_UVR5_DIR = AUDIO_DIR / "uvr5"
+AUTO_REC_DIR = AUDIO_DIR / "auto_recorded_audio"
+AUTO_UVR5_DIR = AUTO_REC_DIR / "uvr5"
 
-AUTO_REC_DIR = os.path.join(AUDIO_DIR, "auto_recorded_audio")
-AUTO_UVR5_DIR = os.path.join(AUTO_REC_DIR, "uvr5")
+SEGMENTS_BASE_DIR = Path("segments_base")
+ASR_DIR = Path("asr_output")
+POST_DIR = Path("post_processing")
+ERROR_LOG_DIR = Path("error_log")
+TOKEN_FILE = Path("hf_token.txt")
 
-SEGMENTS_BASE_DIR = "segments_base"
-ASR_DIR = "asr_output"
-POST_DIR = "post_processing"
-ERROR_LOG_DIR = "error_log"
-TOKEN_FILE = "hf_token.txt"
-
-audio_queue = queue.Queue()
-is_recording = False
-
-# 🚀 최적화 캐시 변수 (중복 로딩 방지용 싱글톤)
 _cached_asr_model = None
 _uvr5_separator_instance = None
 
 def ensure_directories():
     for d in [AUDIO_DIR, MANUAL_UVR5_DIR, AUTO_REC_DIR, AUTO_UVR5_DIR, SEGMENTS_BASE_DIR, ASR_DIR, POST_DIR, ERROR_LOG_DIR]:
-        if not os.path.exists(d):
-            os.makedirs(d)
+        d.mkdir(parents=True, exist_ok=True)
     ah.ensure_handler_directories()
-
-def get_next_filename(directory, prefix, extension="txt"):
-    ensure_directories()
-    existing_files = os.listdir(directory)
-    count = sum(1 for f in existing_files if f.startswith(prefix) and f.endswith(f".{extension}"))
-    return os.path.join(directory, f"{prefix}_{count + 1:03d}.{extension}")
-
-def get_next_audio_filename(directory, extension="wav"):
-    ensure_directories()
-    prefix = "audio"
-    existing_files = os.listdir(directory)
-    count = sum(1 for f in existing_files if f.startswith(prefix) and f.endswith(f".{extension}") and not "vocal" in f.lower() and not "instrumental" in f.lower())
-    return os.path.join(directory, f"{prefix}_{count + 1:03d}.{extension}")
 
 def write_error_log(context_name, error_exception):
     ensure_directories()
-    file_path = get_next_filename(ERROR_LOG_DIR, ERROR_LOG_DIR, "txt")
+    error_files = list(ERROR_LOG_DIR.glob("error_log_*.txt"))
+    file_path = ERROR_LOG_DIR / f"error_log_{len(error_files) + 1:03d}.txt"
     tb_str = traceback.format_exc()
     with open(file_path, "w", encoding="utf-8") as f:
         f.write("=== voice-script-helper-error-report ===\n")
@@ -93,10 +75,9 @@ def write_error_log(context_name, error_exception):
         f.write(f"[트레이스백]\n{tb_str}\n")
 
 def get_huggingface_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-            token = f.read().strip()
-            if token: return token
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token: return token
     return None
 
 def clean_hallucination_text(text):
@@ -145,7 +126,7 @@ def resample_audio(audio_data, orig_sr, target_sr=16000):
 def save_wav_chunk(audio_data, sample_rate, filename):
     try:
         scaled_audio = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
-        with wave.open(filename, 'wb') as wf:
+        with wave.open(str(filename), 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sample_rate)
@@ -153,127 +134,85 @@ def save_wav_chunk(audio_data, sample_rate, filename):
     except Exception as e:
         print(f"[경고] 세그먼트 WAV 저장 실패: {e}")
 
+def format_time(seconds):
+    """초(second) 단위를 입력받아 시:분:초 또는 분:초 형태로 보기 쉽게 변환합니다."""
+    if seconds < 60:
+        return f"{seconds:.1f}초"
+    elif seconds < 3600:
+        m = int(seconds // 60)
+        s = seconds % 60
+        return f"{m}분 {s:.1f}초"
+    else:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h}시간 {m}분 {s:.1f}초"
+
 def apply_uvr5_vocal_extraction(input_audio_path):
     global _uvr5_separator_instance
     if not HAS_UVR5:
         raise RuntimeError("audio-separator 패키지가 설치되어 있지 않아 UVR5 분리를 수행할 수 없습니다.")
 
     ensure_directories()
+    abs_input_path = Path(input_audio_path).resolve()
     
-    # 🔍 사용자 요구사항에 따른 경로 분기 처리
-    # auto_recorded_audio 폴더 안의 파일이면 -> audio/auto_recorded_audio/uvr5/ 에 저장
-    # 그 외(일반 실시간 녹화 또는 메뉴 2 파일 분석 등 audio/ 최상위 파일)면 -> audio/uvr5/ 에 저장
-    abs_input_path = os.path.abspath(input_audio_path)
-    abs_auto_dir = os.path.abspath(AUTO_REC_DIR)
-    
-    if abs_input_path.startswith(abs_auto_dir):
-        target_uvr5_dir = AUTO_UVR5_DIR
-    else:
-        target_uvr5_dir = MANUAL_UVR5_DIR
+    target_uvr5_dir = AUTO_UVR5_DIR if AUTO_REC_DIR.resolve() in abs_input_path.parents else MANUAL_UVR5_DIR
+    target_uvr5_dir.mkdir(parents=True, exist_ok=True)
 
-    if not os.path.exists(target_uvr5_dir):
-        os.makedirs(target_uvr5_dir)
-
-    base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
-    print(f"\n[⏳ UVR5 전처리: 고성능 모델(Voc_FT)로 배경음 및 보컬 정밀 분리 중... ({base_name})]")
+    base_name = abs_input_path.stem
+    print(f"\n[⏳ UVR5 전처리: 배경음 및 보컬 정밀 분리 중... ({base_name})]")
     
     if _uvr5_separator_instance is None:
         _uvr5_separator_instance = Separator()
     
-    _uvr5_separator_instance.output_dir = target_uvr5_dir
+    _uvr5_separator_instance.output_dir = str(target_uvr5_dir)
     _uvr5_separator_instance.load_model('UVR-MDX-NET-Voc_FT.onnx')
         
-    output_files = _uvr5_separator_instance.separate(input_audio_path)
+    output_files = _uvr5_separator_instance.separate(str(abs_input_path))
     
     vocal_file = None
     for f in output_files:
         f_lower = f.lower()
-        full_path = os.path.join(target_uvr5_dir, f)
+        full_path = target_uvr5_dir / f
         if "vocals" in f_lower:
-            new_vocal_name = f"{base_name}_Vocals.wav"
-            new_vocal_path = os.path.join(target_uvr5_dir, new_vocal_name)
-            if os.path.exists(full_path):
-                if os.path.exists(new_vocal_path): os.remove(new_vocal_path)
-                os.rename(full_path, new_vocal_path)
+            new_vocal_path = target_uvr5_dir / f"{base_name}_Vocals.wav"
+            if full_path.exists():
+                if new_vocal_path.exists(): new_vocal_path.unlink()
+                full_path.rename(new_vocal_path)
             vocal_file = new_vocal_path
         elif "instrumental" in f_lower or "background" in f_lower or "no_vocals" in f_lower:
-            new_inst_name = f"{base_name}_Instrumental.wav"
-            new_inst_path = os.path.join(target_uvr5_dir, new_inst_name)
-            if os.path.exists(full_path):
-                if os.path.exists(new_inst_path): os.remove(new_inst_path)
-                os.rename(full_path, new_inst_path)
+            new_inst_path = target_uvr5_dir / f"{base_name}_Instrumental.wav"
+            if full_path.exists():
+                if new_inst_path.exists(): new_inst_path.unlink()
+                full_path.rename(new_inst_path)
             
-    if vocal_file and os.path.exists(vocal_file):
+    if vocal_file and vocal_file.exists():
         print(f"[+ 성공] 보컬 분리 완료: {vocal_file}")
-        return vocal_file
+        return str(vocal_file)
     else:
         raise RuntimeError(f"UVR5 분리 완료 후 'Vocals' 파일을 찾을 수 없습니다: {base_name}")
 
 def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="audio", active_speakers=None, is_single_speaker_target=False):
     try:
+        ensure_directories()
         max_val = np.max(np.abs(audio_data))
-        if max_val > 0.0001:
+        if max_val > 1e-5:
             audio_data = audio_data / max_val
 
-        clean_source_name = os.path.splitext(os.path.basename(source_identifier))[0]
-        parent_audio_dir = os.path.join(SEGMENTS_BASE_DIR, clean_source_name)
-        if not os.path.exists(parent_audio_dir):
-            os.makedirs(parent_audio_dir)
+        raw_source_stem = Path(source_identifier).stem
+        clean_source_name = re.sub(r'_Vocals$', '', raw_source_stem, flags=re.IGNORECASE)
+        
+        parent_audio_dir = SEGMENTS_BASE_DIR / clean_source_name
+        parent_audio_dir.mkdir(parents=True, exist_ok=True)
             
         prefix_str = "seg_single" if is_single_speaker_target and active_speakers else "segment"
-        existing_subdirs = [d for d in os.listdir(parent_audio_dir) if os.path.isdir(os.path.join(parent_audio_dir, d)) and d.startswith(prefix_str)]
-        next_seg_num = len(existing_subdirs) + 1
-        specific_segment_dir = os.path.join(parent_audio_dir, f"{prefix_str}_{next_seg_num}")
-        os.makedirs(specific_segment_dir, exist_ok=True)
+        existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
+        specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
+        specific_segment_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n[⏳ 1단계: 전체 보컬 오디오 통합 분석 중 (구간별 처리)]")
+        print("\n[⏳ 1단계: 화자 분리(Diarization) 수행 중...]")
         total_duration = audio_data.shape[0] / sample_rate
-        chunk_duration = 30.0 
-        full_extracted = []
         
-        if total_duration > chunk_duration:
-            num_chunks = int(np.ceil(total_duration / chunk_duration))
-            with tqdm(total=num_chunks, desc="[🎯 전체 보컬 분석]", unit="구간") as pbar:
-                for i in range(num_chunks):
-                    start_sec = i * chunk_duration
-                    end_sec = min((i + 1) * chunk_duration, total_duration)
-                    
-                    s_idx = int(start_sec * sample_rate)
-                    e_idx = int(end_sec * sample_rate)
-                    sub_audio = audio_data[s_idx:e_idx]
-                    
-                    if len(sub_audio) > 0:
-                        try:
-                            res_sub = model.transcribe((sub_audio, sample_rate))
-                        except Exception:
-                            res_sub = ""
-
-                        if isinstance(res_sub, list):
-                            for item in res_sub:
-                                full_extracted.append(str(getattr(item, "text", item.get("text", item) if isinstance(item, dict) else item)))
-                        else:
-                            full_extracted.append(str(getattr(res_sub, "text", res_sub.get("text", res_sub) if isinstance(res_sub, dict) else res_sub)))
-                    pbar.update(1)
-        else:
-            try:
-                res_full = model.transcribe((audio_data, sample_rate))
-            except Exception:
-                res_full = ""
-
-            if isinstance(res_full, list):
-                for item in res_full:
-                    full_extracted.append(str(getattr(item, "text", item.get("text", item) if isinstance(item, dict) else item)))
-            else:
-                full_extracted.append(str(getattr(res_full, "text", res_full.get("text", res_full) if isinstance(res_full, dict) else res_full)))
-        
-        raw_full_text = "\n".join([clean_hallucination_text(line) for line in full_extracted if clean_hallucination_text(line)]).strip()
-        
-        asr_raw_file = get_next_filename(ASR_DIR, ASR_DIR, "txt")
-        with open(asr_raw_file, "w", encoding="utf-8") as f:
-            f.write(raw_full_text)
-        print(f"[💾 원본 ASR 저장 완료] {asr_raw_file}")
-
-        print(f"\n[⏳ 2단계: 화자 분리 및 노이즈 구간 필터링]")
         raw_speaker_turns = []
         if HAS_PYANNOTE and not is_single_speaker_target:
             token = get_huggingface_token()
@@ -286,79 +225,85 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
                     
                     annotation = getattr(diarization, "speaker_diarization", diarization)
                     for turn, _, speaker in annotation.itertracks(yield_label=True):
-                        duration = turn.end - turn.start
-                        if duration >= 1.0:
+                        if (turn.end - turn.start) >= 1.0:
                             raw_speaker_turns.append((turn.start, turn.end, speaker))
                     print(f"[+] 유효 발화 구간 {len(raw_speaker_turns)}개 추출됨")
                 except Exception as ex:
                     print(f"[경고] 화자 분리 중 오류: {ex}")
-        else:
-            raw_speaker_turns.append((0.0, total_duration, "single_speaker"))
+        
+        if not raw_speaker_turns:
+            raw_speaker_turns.append((0.0, total_duration, "speaker_1"))
 
         speaker_mapping = {}
         if active_speakers and len(active_speakers) > 1:
-            unique_orig_speakers = sorted(list(set([s for _, _, s in raw_speaker_turns])))
+            unique_orig_speakers = sorted({s for _, _, s in raw_speaker_turns})
             for idx, orig_s in enumerate(unique_orig_speakers):
-                if idx < len(active_speakers):
-                    speaker_mapping[orig_s] = active_speakers[idx]
-                else:
-                    speaker_mapping[orig_s] = f"speaker_{idx+1}"
+                speaker_mapping[orig_s] = active_speakers[idx] if idx < len(active_speakers) else f"speaker_{idx+1}"
         else:
             s_name = active_speakers[0] if active_speakers else "speaker_1"
             for _, _, orig_speaker in raw_speaker_turns:
                 speaker_mapping[orig_speaker] = s_name
 
-        post_file_path = get_next_filename(POST_DIR, POST_DIR, "txt")
+        print("\n[⏳ 2단계: 각 구간별 개별 ASR 인식 및 세그먼트 저장 시작]")
+        all_full_texts = []
+        POST_DIR.mkdir(exist_ok=True)
+        
+        existing_posts = list(POST_DIR.glob(f"{clean_source_name}_post_*.txt"))
+        post_file_path = POST_DIR / f"{clean_source_name}_post_{len(existing_posts) + 1:03d}.txt"
+        
         with open(post_file_path, "w", encoding="utf-8") as post_file_obj:
             post_file_obj.write(f"=== 정제된 화자별 대화 로그 (출처: {source_identifier}) ===\n\n")
 
-            if raw_speaker_turns:
-                print(f"\n[⏳ 3단계: 조각별 개별 ASR 분석 및 세그먼트 저장]")
-                with tqdm(total=len(raw_speaker_turns), desc="[🎯 음성 분석 추출]", unit="구간") as pbar:
-                    for idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns):
-                        mapped_speaker = speaker_mapping.get(orig_speaker, "speaker_1")
-                        
-                        start_sample = int(start * sample_rate)
-                        end_sample = int(end * sample_rate)
-                        chunk_audio = audio_data[start_sample:end_sample]
-                        
-                        try:
-                            res_chunk = model.transcribe((chunk_audio, sample_rate))
-                            chunk_texts = []
-                            if isinstance(res_chunk, list):
-                                for item in res_chunk:
-                                    chunk_texts.append(str(getattr(item, "text", item.get("text", item) if isinstance(item, dict) else item)))
-                            else:
-                                chunk_texts.append(str(getattr(res_chunk, "text", res_chunk.get("text", res_chunk) if isinstance(res_chunk, dict) else res_chunk)))
-                            
-                            raw_chunk_txt = " ".join([clean_hallucination_text(t) for t in chunk_texts if clean_hallucination_text(t)])
-                        except Exception as asr_err:
-                            raw_chunk_txt = f"(ASR 오류: {asr_err})"
+            for idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns):
+                mapped_speaker = speaker_mapping.get(orig_speaker, "speaker_1")
+                
+                start_sample = int(start * sample_rate)
+                end_sample = int(end * sample_rate)
+                chunk_audio = audio_data[start_sample:end_sample]
+                
+                chunk_text = ""
+                if chunk_audio.size > sample_rate * 0.2:
+                    try:
+                        res_chunk = model.transcribe((chunk_audio, sample_rate))
+                        if hasattr(res_chunk, "text"):
+                            chunk_text = res_chunk.text
+                        elif isinstance(res_chunk, list):
+                            chunk_text = " ".join([str(item.get("text", item)) if isinstance(item, dict) else str(getattr(item, "text", item)) for item in res_chunk])
+                        else:
+                            chunk_text = str(res_chunk)
+                    except Exception as e:
+                        print(f"[경고] {idx}번 구간 ASR 처리 실패: {e}")
 
-                        chunk_txt = ah.apply_text_corrections(raw_chunk_txt, mapped_speaker)
+                chunk_txt = clean_hallucination_text(chunk_text)
+                chunk_txt = ah.apply_text_corrections(chunk_txt, mapped_speaker)
+                if not chunk_txt:
+                    chunk_txt = "(음성 인식 내용 없음)"
 
-                        if chunk_txt and chunk_txt != "(음성 인식 내용 없음)":
-                            base_seg_name = f"seg_sub_{idx:03d}_{mapped_speaker}_{start:.1f}s-{end:.1f}s"
-                            seg_wav_filename = os.path.join(specific_segment_dir, f"{base_seg_name}.wav")
-                            seg_txt_filename = os.path.join(specific_segment_dir, f"{base_seg_name}.txt")
-                            seg_raw_txt_filename = os.path.join(specific_segment_dir, f"{base_seg_name}.raw_txt")
-                            
-                            save_wav_chunk(chunk_audio, sample_rate, seg_wav_filename)
-                            
-                            try:
-                                with open(seg_txt_filename, "w", encoding="utf-8") as st_f:
-                                    st_f.write(chunk_txt)
-                                with open(seg_raw_txt_filename, "w", encoding="utf-8") as srt_f:
-                                    srt_f.write(raw_chunk_txt)
-                            except Exception:
-                                pass
+                base_seg_name = f"seg_sub_{idx:03d}_{mapped_speaker}_{start:.1f}s-{end:.1f}s"
+                seg_wav_filename = specific_segment_dir / f"{base_seg_name}.wav"
+                seg_txt_filename = specific_segment_dir / f"{base_seg_name}.txt"
+                
+                save_wav_chunk(chunk_audio, sample_rate, seg_wav_filename)
+                seg_txt_filename.write_text(chunk_txt, encoding="utf-8")
 
-                            log_line = f"[{mapped_speaker}] ({start:.1f}초 ~ {end:.1f}초): {chunk_txt}"
-                            post_file_obj.write(log_line + "\n")
-                        pbar.update(1)
-        
-        print(f"\n[🎉 분석 완료! 단일 통합 결과 폴더: {specific_segment_dir}/]")
-        return specific_segment_dir
+                # 보기 편하게 포맷팅 함수 적용
+                start_str = format_time(start)
+                end_str = format_time(end)
+
+                log_line = f"[{mapped_speaker}] ({start_str} ~ {end_str}): {chunk_txt}"
+                post_file_obj.write(log_line + "\n")
+                all_full_texts.append(log_line)
+                print(f"  - 구간 처리 완료 [{idx+1}/{len(raw_speaker_turns)}] {mapped_speaker} ({start_str} ~ {end_str})")
+
+        ASR_DIR.mkdir(exist_ok=True)
+        existing_asrs = list(ASR_DIR.glob(f"{clean_source_name}_asr_*.txt"))
+        asr_raw_file = ASR_DIR / f"{clean_source_name}_asr_{len(existing_asrs) + 1:03d}.txt"
+        asr_raw_file.write_text("\n".join(all_full_texts), encoding="utf-8")
+
+        print(f"\n[💾 후처리 로그 저장 완료] {post_file_path}")
+        print(f"[💾 ASR 전체 결과 저장 완료] {asr_raw_file}")
+        print(f"[🎉 분석 완료! 결과 폴더: {specific_segment_dir}/]")
+        return str(specific_segment_dir)
 
     except Exception as e:
         write_error_log("파이프라인 실행 중", e)
@@ -368,8 +313,8 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
 def configure_strict_analysis_pipeline(audio_data, sample_rate):
     while True:
         print("\n==============================================")
-        print("               음원 분석 모드 선택")
-        print("==============================================")
+        print("              음원 분석 모드 선택")
+        print("============================================== ")
         print(" 0. 기본 분석")
         print(" 1. 단일 화자 알고리즘 분석")
         print(" 2. 다중 화자 알고리즘 분석")
@@ -380,49 +325,38 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
         if mode == "3":
             print("[*] 메인 메뉴로 돌아갑니다.")
             return None, False
-
-        existing = ah.load_existing_profiles()
-        print(f"[*] 시스템에 등록된 프로파일 목록: {existing if existing else '없음'}")
-        
         if mode == "0":
             print("[*] 기본 분석 모드로 진행합니다.")
             return [], False
+
+        existing = ah.load_existing_profiles()
+        print(f"[*] 시스템에 등록된 프로파일 목록: {existing if existing else '없음'}")
             
-        elif mode == "1":
+        if mode == "1":
             if not existing:
-                print("\n[알림] 등록된 알고리즘 프로파일이 없습니다. 다른 분석 모드를 선택해주세요.\n")
+                print("\n[알림] 등록된 알고리즘 프로파일이 없습니다.\n")
                 continue
-                
-            matched_speakers = []
-            for algo_name in existing:
-                if ah.verify_single_speaker(algo_name, audio_data):
-                    matched_speakers.append(algo_name)
-            
+            matched_speakers = [algo_name for algo_name in existing if ah.verify_single_speaker(algo_name, audio_data)]
             if not matched_speakers:
-                print("[🚫 분석 차단] 등록된 단일 화자 알고리즘 중 유연한 피치 매칭을 만족하는 프로파일이 없습니다.")
+                print("[🚫 분석 차단] 일치하는 화자 프로파일이 없습니다.")
                 continue
-                
             print(f"[+] 일치하는 화자 프로파일 감지됨: {matched_speakers[0]}")
             return [matched_speakers[0]], True
             
         elif mode == "2":
             if not existing:
-                print("\n[알림] 등록된 알고리즘 프로파일이 없습니다. 다른 분석 모드를 선택해주세요.\n")
+                print("\n[알림] 등록된 알고리즘 프로파일이 없습니다.\n")
                 continue
-                
             success, msg = ah.verify_multi_speakers_auto(audio_data)
             if not success:
                 print(f"[🚫 분석 차단] {msg}")
                 continue
-                
             print(f"[+] 다중 화자 검증 통과. 등록된 전체 프로파일({existing})을 적용합니다.")
             return existing, False
-            
         else:
             print("[오류] 올바른 번호를 입력해주세요.")
 
 def execute_analysis_flow(model, target_file):
-    # 1. 원본 오디오 파일 로드
     try:
         with wave.open(target_file, 'rb') as wf:
             sr = wf.getframerate()
@@ -432,19 +366,16 @@ def execute_analysis_flow(model, target_file):
             audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
             if n_channels > 1:
                 audio_data = np.mean(audio_data.reshape(-1, n_channels), axis=1)
-
         audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
     except Exception as e:
         write_error_log("오디오 파일 로드 단계", e)
         print(f"\n[오류] 오디오 파일을 읽어오는 중 문제가 발생했습니다: {e}")
         return
 
-    # 2. UVR5 분리 전에 [음원 분석 모드 선택] 메뉴를 먼저 출력하고 사용자 선택 받기
     active_speakers, is_single = configure_strict_analysis_pipeline(audio_data, TARGET_SAMPLE_RATE)
     if active_speakers is None:
         return
 
-    # 3. 분석 모드 선택 후, UVR5 보컬 분리 수행 (정해진 폴더 규칙 적용)
     try:
         processed_vocal_path = apply_uvr5_vocal_extraction(target_file)
     except Exception as e:
@@ -452,7 +383,6 @@ def execute_analysis_flow(model, target_file):
         print(f"\n[🚫 분석 차단] UVR5 분리 과정 오류로 작업을 중단합니다.\n[상세 오류]: {e}")
         return
 
-    # 4. 분리된 보컬 파일 로드 후 ASR 파이프라인 진행
     with wave.open(processed_vocal_path, 'rb') as wf:
         sr = wf.getframerate()
         n_channels = wf.getnchannels()
@@ -463,21 +393,18 @@ def execute_analysis_flow(model, target_file):
             vocal_audio_data = np.mean(vocal_audio_data.reshape(-1, n_channels), axis=1)
 
     vocal_audio_data = resample_audio(vocal_audio_data, sr, TARGET_SAMPLE_RATE)
-
     process_audio_pipeline(model, vocal_audio_data, TARGET_SAMPLE_RATE, source_identifier=processed_vocal_path, active_speakers=active_speakers, is_single_speaker_target=is_single)
 
 def record_and_transcribe(model):
-    global is_recording
-    
     print("\n==============================================")
     print("                녹화 방식 선택")
-    print("==============================================")
+    print("============================================== ")
     print(" 1. 실시간 녹화 ")
     print(" 2. 시간 선택 자동 녹화 ")
     print("----------------------------------------------")
     rec_mode = input("선택: ").strip()
     
-    target_total_seconds = 0
+    target_total_seconds = 0.0
     min_input = 0.0
     if rec_mode == "2":
         try:
@@ -511,27 +438,32 @@ def record_and_transcribe(model):
         p.terminate()
         return
 
-    print(f"\n[*] 준비되었습니다.")
-    print("💡 브라우저 소리만 녹화됩니다.")
-    print("💡 유튜브, 동영상, 스트리밍 등 오디오를 재생해 주세요!")
-    
+    print(f"\n[*] 준비되었습니다.\n💡 브라우저 소리만 녹화됩니다.")
     if rec_mode == "1":
         input("👉 소리가 나는 상태에서 엔터(Enter) 키를 누르면 녹화가 시작됩니다...")
         print(f"\n[🔴 브라우저 녹화 중...] (끝내려면 Enter)")
     else:
-        input(f"👉 엔터를 누르면 [{min_input}분] 동안 자동 녹화가 시작됩니다. (중간 종료하려면 Enter)")
-        print(f"\n[🔴 브라우저 자동 녹화 중...] (목표 시간: {min_input}분 / 중간 종료하려면 Enter)")
+        input(f"👉 엔터를 누르면 [{min_input}분] 동안 자동 녹화가 시작됩니다.")
+        print(f"\n[🔴 브라우저 자동 녹화 중...] (목표 시간: {min_input}분)")
 
     stop_event = threading.Event()
+    audio_queue = queue.Queue()
     buffer = []
-    is_recording = True
+    is_recording_flag = True
     start_time = time.time()
     
     SPLIT_INTERVAL_SECONDS = 300.0
     saved_file_paths = []
     
+    current_auto_session_dir = AUTO_REC_DIR
+    if rec_mode == "2":
+        AUTO_REC_DIR.mkdir(parents=True, exist_ok=True)
+        existing_subdirs = [d for d in AUTO_REC_DIR.iterdir() if d.is_dir() and d.name.startswith("auto_recorded_")]
+        current_auto_session_dir = AUTO_REC_DIR / f"auto_recorded_{len(existing_subdirs) + 1:03d}"
+        current_auto_session_dir.mkdir(parents=True, exist_ok=True)
+
     def audio_callback(in_data, frame_count, time_info, status):
-        if is_recording:
+        if is_recording_flag:
             audio_queue.put(in_data)
         return (None, pyaudio.paContinue)
 
@@ -545,7 +477,6 @@ def record_and_transcribe(model):
         stream_callback=audio_callback
     )
     stream.start_stream()
-
     threading.Thread(target=lambda: (input(), stop_event.set()), daemon=True).start()
 
     def save_current_buffer(current_buf):
@@ -555,22 +486,20 @@ def record_and_transcribe(model):
         if channels > 1:
             raw_audio = np.mean(raw_audio.reshape(-1, channels), axis=1)
         
-        ensure_directories()
+        target_dir = current_auto_session_dir if rec_mode == "2" else AUDIO_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
         
-        # 📂 저장 경로 분기 규칙 적용
-        # rec_mode가 "2"(자동 녹화)이면 audio/auto_recorded_audio/ 에 저장
-        # rec_mode가 "1"(실시간 녹화)이면 audio/ 에 저장
-        target_dir = AUTO_REC_DIR if rec_mode == "2" else AUDIO_DIR
+        clean_wavs = [f for f in target_dir.glob("audio_*.wav") if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower()]
+        temp_recorded_path = target_dir / f"audio_{len(clean_wavs) + 1:03d}.wav"
         
-        temp_recorded_path = get_next_audio_filename(target_dir, "wav")
         scaled_audio = np.clip(raw_audio * 32767, -32768, 32767).astype(np.int16)
-        with wave.open(temp_recorded_path, 'wb') as wf:
+        with wave.open(str(temp_recorded_path), 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(native_sr)
             wf.writeframes(scaled_audio.tobytes())
         print(f"\n[💾 오디오 파일 저장 완료] {temp_recorded_path}")
-        saved_file_paths.append(temp_recorded_path)
+        saved_file_paths.append(str(temp_recorded_path))
 
     try:
         last_split_time = start_time
@@ -588,24 +517,26 @@ def record_and_transcribe(model):
                     buffer = []
                 last_split_time = current_time
 
-            audio_level = 0.0
+            current_chunk_rms = 0.0
             while not audio_queue.empty():
                 chunk = audio_queue.get()
                 audio_np = np.frombuffer(chunk, dtype=np.float32)
                 buffer.append(audio_np)
                 if audio_np.size > 0:
-                    audio_level = np.max(np.abs(audio_np))
-            
-            bar_len = 30
-            filled_len = int(min(audio_level * 150, bar_len))
-            bar_str = "█" * filled_len + "-" * (bar_len - filled_len)
-            sys.stdout.write(f"\r[🔴 녹화 중] 시간: {elapsed:4.1f}초 | 볼륨: [{bar_str}] ({audio_level:.4f})")
+                    current_chunk_rms = np.sqrt(np.mean(audio_np**2))
+
+            bar_length = 20
+            filled_length = int(min(current_chunk_rms * 50, 1.0) * bar_length)
+            gauge = "█" * filled_length + "-" * (bar_length - filled_length)
+
+            elapsed_str = format_time(elapsed)
+            sys.stdout.write(f"\r[🔴 녹화 중] 시간: {elapsed_str} | 신호 [{gauge}] (종료: Enter)")
             sys.stdout.flush()
-            time.sleep(0.05)
+            time.sleep(0.1)
     except Exception as e:
         print(f"\n[경고] 녹화 루프 중 예외 발생: {e}")
     finally:
-        is_recording = False
+        is_recording_flag = False
         stream.stop_stream()
         stream.close()
         p.terminate()
@@ -618,12 +549,7 @@ def record_and_transcribe(model):
         print("\n[알림] 녹음된 오디오가 없습니다.")
         return
 
-    target_save_loc = AUTO_REC_DIR if rec_mode == "2" else AUDIO_DIR
     print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
-    print(f"[*] 저장 위치: {target_save_loc}/")
-    
-    # 메뉴 1번 흐름: 녹화가 끝나면 곧바로 분석 흐름(분석 메뉴 선택 ➔ UVR5 ➔ ASR)으로 연계
-    print(f"\n[*] 녹화된 파일에 대한 분석 모드를 시작합니다.")
     for target_file in saved_file_paths:
         print(f"\n----------------------------------------------")
         print(f"[*] 대상 파일 분석 시작: {target_file}")
@@ -632,23 +558,112 @@ def record_and_transcribe(model):
 
 def select_and_process_audio_file(model):
     ensure_directories()
-    files = []
-    for root, dirs, filenames in os.walk(AUDIO_DIR):
-        # auto_recorded_audio 폴더 내의 파일은 메뉴 2번 파일 분석 리스트에서 제외 (메뉴 1 자동녹화 전용)
-        if AUTO_REC_DIR in root:
+    while True:
+        print("\n==============================================")
+        print("          오디오 파일 선택 및 분석")
+        print("============================================== ")
+        print(" 0. 자동녹화 폴더 선택")
+        
+        normal_files = []
+        if AUDIO_DIR.exists():
+            for f in AUDIO_DIR.glob("*.wav"):
+                if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower():
+                    normal_files.append(f)
+        
+        for idx, filepath in enumerate(normal_files, 1):
+            print(f" {idx}. {filepath.name}")
+            
+        back_option_num = len(normal_files) + 1
+        print(f" {back_option_num}. 메인 메뉴로 돌아가기")
+        print("----------------------------------------------")
+        
+        choice = input("선택: ").strip()
+        if not choice.isdigit():
+            print("[오류] 올바른 번호를 선택해주세요.")
             continue
-        for f in filenames:
-            if f.lower().endswith('.wav') and not "vocal" in f.lower() and not "instrumental" in f.lower():
-                files.append(os.path.join(root, f))
+            
+        choice_val = int(choice)
+        if choice_val == back_option_num:
+            print("[*] 메인 메뉴로 돌아갑니다.")
+            return
+            
+        if choice_val == 0:
+            if not AUTO_REC_DIR.exists():
+                print("\n[알림] 생성된 자동녹화 폴더가 없습니다.")
+                continue
                 
-    if not files:
-        print(f" [!] '{AUDIO_DIR}' 폴더 내에 분석 가능한 원본 WAV 파일이 없습니다.")
-        return
+            sub_sessions = sorted([d for d in AUTO_REC_DIR.iterdir() if d.is_dir() and d.name.startswith("auto_recorded_")])
+            if not sub_sessions:
+                print("\n[알림] 자동녹화된 세션 폴더가 없습니다.")
+                continue
+                
+            print("\n==============================================")
+            print("          자동녹화 세션 폴더 목록")
+            print("============================================== ")
+            for s_idx, s_dir in enumerate(sub_sessions, 1):
+                print(f" {s_idx}. {s_dir.name}")
+            print(f" {len(sub_sessions) + 1}. 이전 메뉴로")
+            print("----------------------------------------------")
+            
+            s_choice = input("선택: ").strip()
+            if not s_choice.isdigit():
+                continue
+                
+            s_idx_val = int(s_choice) - 1
+            if s_idx_val == len(sub_sessions):
+                continue
+            if not (0 <= s_idx_val < len(sub_sessions)):
+                print("[오류] 범위를 벗어난 선택입니다.")
+                continue
+                
+            chosen_session_dir = sub_sessions[s_idx_val]
+            session_wavs = sorted([
+                f for f in chosen_session_dir.glob("*.wav") 
+                if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower()
+            ])
+            
+            if not session_wavs:
+                print(f"\n[알림] 선택한 폴더 내에 분석할 WAV 파일이 없습니다.")
+                continue
+                
+            print(f"\n[+] 총 {len(session_wavs)}개의 분할된 오디오 파일을 순차적으로 분석합니다.")
+            for target_file in session_wavs:
+                print(f"\n----------------------------------------------")
+                print(f"[*] 대상 파일 분석 중: {target_file.name}")
+                print(f"----------------------------------------------")
+                execute_analysis_flow(model, str(target_file))
+            break
+        else:
+            idx_val = choice_val - 1
+            if not (0 <= idx_val < len(normal_files)):
+                print("[오류] 올바른 번호를 입력해주세요.")
+                continue
+            target_file = normal_files[idx_val]
+            execute_analysis_flow(model, str(target_file))
+            break
 
-    for idx, filepath in enumerate(files, 1):
-        print(f" {idx}. {filepath}")
-    choice = input("분석할 파일 번호 입력 (메뉴로 돌아가려면 엔터 또는 기타 키): ").strip()
-    if not choice.isdigit() or int(choice)-1 >= len(files): return
-    
-    target_file = files[int(choice)-1]
-    execute_analysis_flow(model, target_file)
+if __name__ == "__main__":
+    ensure_directories()
+    asr_model = load_asr_model()
+    if not asr_model:
+        print("[오류] ASR 모델을 불러오지 못해 프로그램을 종료합니다.")
+        sys.exit(1)
+
+    while True:
+        print("\n==============================================")
+        print("         Voice Script Helper (메인)")
+        print("============================================== ")
+        print(" 1. 브라우저 오디오 녹화 및 자동 분석")
+        print(" 2. 기존 오디오 파일 선택 및 분석")
+        print(" 3. 종료")
+        print("----------------------------------------------")
+        sel = input("선택: ").strip()
+        if sel == "1":
+            record_and_transcribe(asr_model)
+        elif sel == "2":
+            select_and_process_audio_file(asr_model)
+        elif sel == "3":
+            print("[*] 프로그램을 종료합니다.")
+            break
+        else:
+            print("[오류] 올바른 번호를 선택해주세요.")

@@ -1,7 +1,27 @@
+## 🛠️ 설치 가이드 (Installation)
+
+깃허브(GitHub)에서 소스코드를 다운로드하고 필요한 파이썬 라이브러리를 설치하는 방법입니다.
+
+1. **저장소 클론 (Clone Repository)**
+   - 터미널(CMD 또는 PowerShell)을 열고 아래 명령어를 입력하여 프로젝트를 다운로드합니다.
+   - git clone <깃허브_REPOSITORY_URL>
+   - cd voice-script-helper
+
+2. **가상 환경 생성 및 활성화 (권장)**
+   - python -m venv venv
+   - 윈도우(Windows)의 경우: `venv\Scripts\activate
+
+3. **필수 라이브러리 설치**
+   - 프로젝트 구동에 필요한 라이브러리를 일괄 설치합니다.
+   - pip install -r requirements.txt
+   - *(참고: 원활한 오디오 처리 및 AI 모델 구동을 위해 PyTorch, Transformers, Gradio 등의 패키지가 포함되어 있습니다.)*
+
+---
+
 ## 메뉴 각 기능 설명
 
 0. **허깅페이스 토큰 설정**
-   - 허깅페이스 사이트 가입 후 토큰을 생성하고, 3개의 약관 동의 후 `hf_`로 시작하는 토큰을 등록하세요.
+   - 허깅페이스 사이트 가입 후 토큰을 생성하고, 3개의 약관 동의 후 "hf_"로 시작하는 토큰을 등록하세요.
 
 1. **실시간 녹화**
    - 실시간으로 브라우저의 소리만 녹음됩니다.

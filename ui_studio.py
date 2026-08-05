@@ -10,22 +10,30 @@ def get_single_speaker_folders():
     if not os.path.exists(SEGMENTS_BASE_DIR):
         return []
     folders = []
-    for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
-        for d in dirs:
-            if d.startswith("seg_single"):
-                rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
-                folders.append(rel_path)
+    try:
+        for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
+            for d in dirs:
+                # 영문 및 한글 단일 화자 폴더 네이밍 모두 수용하도록 유연한 조건 적용
+                if d.startswith("seg_single") or "single" in d.lower() or "단일" in d:
+                    rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
+                    folders.append(rel_path)
+    except Exception as e:
+        print(f"[경고] 단일 화자 폴더 탐색 중 예외 발생: {e}")
     return folders
 
 def get_basic_segment_folders():
     if not os.path.exists(SEGMENTS_BASE_DIR):
         return []
     folders = []
-    for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
-        for d in dirs:
-            if d.startswith("세그먼트") and not d.startswith("seg_multi"):
-                rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
-                folders.append(rel_path)
+    try:
+        for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
+            for d in dirs:
+                # 다중 화자가 아니면서 기본 분석 및 영문 세그먼트 패턴을 포괄하도록 정돈
+                if not d.startswith("seg_multi") and ("세그먼트" in d or "seg" in d.lower() or "basic" in d.lower()):
+                    rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
+                    folders.append(rel_path)
+    except Exception as e:
+        print(f"[경고] 기본 분석 폴더 탐색 중 예외 발생: {e}")
     return folders
 
 def clone_items(items):
@@ -134,7 +142,11 @@ def run_data_refinement_webui():
             if not os.path.exists(target_dir):
                 return [[], [], [], 1, "존재하지 않는 폴더입니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
                 
-            wav_files = sorted([f for f in os.listdir(target_dir) if f.lower().endswith('.wav')])
+            try:
+                wav_files = sorted([f for f in os.listdir(target_dir) if f.lower().endswith('.wav')])
+            except Exception as e:
+                return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
+
             if not wav_files:
                 return [[], [], [], 1, "해당 폴더에 WAV 파일이 없습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
                 
@@ -146,8 +158,11 @@ def run_data_refinement_webui():
                 
                 t_content = ""
                 if os.path.exists(t_path):
-                    with open(t_path, "r", encoding="utf-8") as tf:
-                        t_content = tf.read().strip()
+                    try:
+                        with open(t_path, "r", encoding="utf-8") as tf:
+                            t_content = tf.read().strip()
+                    except Exception:
+                        t_content = ""
                 items.append({"wav": w_path, "txt": t_path, "content": t_content, "original_content": t_content, "deleted": False})
             
             total_pages = int(np.ceil(len(items) / ITEMS_PER_PAGE))
