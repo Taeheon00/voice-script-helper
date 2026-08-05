@@ -13,7 +13,6 @@ def get_single_speaker_folders():
     try:
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
-                # 영문 및 한글 단일 화자 폴더 네이밍 모두 수용하도록 유연한 조건 적용
                 if d.startswith("seg_single") or "single" in d.lower() or "단일" in d:
                     rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
                     folders.append(rel_path)
@@ -28,7 +27,6 @@ def get_basic_segment_folders():
     try:
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
-                # 다중 화자가 아니면서 기본 분석 및 영문 세그먼트 패턴을 포괄하도록 정돈
                 if not d.startswith("seg_multi") and ("세그먼트" in d or "seg" in d.lower() or "basic" in d.lower()):
                     rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
                     folders.append(rel_path)
@@ -53,7 +51,7 @@ def run_data_refinement_webui():
             gr.Markdown("## 🛠️ 데이터 정제 및 화자 알고리즘 등록 스튜디오")
             close_ui_btn = gr.Button("🚪 Web UI 종료 (메뉴로 돌아가기)", variant="stop")
 
-        gr.Markdown("💡 **안내:** 단일 화자 세그먼트 또는 기본 분석 세그먼트 중 작업할 폴더를 선택하여 불러오세요. (다중 화자는 원천 차단됩니다)")
+        gr.Markdown("💡 **안내:** 단일 화자 세그먼트 또는 기본 분석 세그먼트 중 작업할 폴더를 선택하여 불러오세요.")
 
         with gr.Row(variant="panel"):
             with gr.Column():
@@ -61,7 +59,7 @@ def run_data_refinement_webui():
                 single_dropdown = gr.Dropdown(choices=single_folders, value=default_single, label="단일 화자 세그먼트", interactive=True)
                 load_single_btn = gr.Button("📁 단일 화자 불러오기", variant="primary")
             with gr.Column():
-                gr.Markdown("### 📁 기본 분석 폴더 선택 (알고리즘 최초 등록용)")
+                gr.Markdown("### 📁 기본 분석 폴더 선택")
                 basic_dropdown = gr.Dropdown(choices=basic_folders, value=default_basic, label="기본 분석 세그먼트", interactive=True)
                 load_basic_btn = gr.Button("📁 기본 분석 불러오기", variant="primary")
 
@@ -103,9 +101,9 @@ def run_data_refinement_webui():
         for i in range(ITEMS_PER_PAGE):
             with gr.Row(visible=False) as r_box:
                 with gr.Column(scale=2):
-                    a_comp = gr.Audio(label=f"세그먼트 #{i+1} 오디오", type="filepath", interactive=False)
+                    a_comp = gr.Audio(label=f"세그먼트 {i+1}", type="filepath", interactive=False)
                 with gr.Column(scale=3):
-                    t_comp = gr.Textbox(label=f"세그먼트 #{i+1} 대사 수정", lines=2, interactive=True)
+                    t_comp = gr.Textbox(label=f"세그먼트 {i+1}", lines=2, interactive=True)
                 with gr.Column(scale=1, min_width=80):
                     del_btn = gr.Button("🗑️ 삭제", variant="stop")
                 
@@ -136,19 +134,19 @@ def run_data_refinement_webui():
 
         def load_folder_data(folder_name):
             if not folder_name:
-                return [[], [], [], 1, "폴더가 선택되지 않았습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
+                return [[], [], [], 1, "폴더가 선택되지 않았습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
             
             target_dir = os.path.join(SEGMENTS_BASE_DIR, folder_name)
             if not os.path.exists(target_dir):
-                return [[], [], [], 1, "존재하지 않는 폴더입니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
+                return [[], [], [], 1, "존재하지 않는 폴더입니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
                 
             try:
                 wav_files = sorted([f for f in os.listdir(target_dir) if f.lower().endswith('.wav')])
             except Exception as e:
-                return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
+                return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
 
             if not wav_files:
-                return [[], [], [], 1, "해당 폴더에 WAV 파일이 없습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 5)
+                return [[], [], [], 1, "해당 폴더에 WAV 파일이 없습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
                 
             items = []
             for w_f in wav_files:
@@ -163,7 +161,27 @@ def run_data_refinement_webui():
                             t_content = tf.read().strip()
                     except Exception:
                         t_content = ""
-                items.append({"wav": w_path, "txt": t_path, "content": t_content, "original_content": t_content, "deleted": False})
+                
+                speaker_num = "1"
+                lower_wf = w_f.lower()
+                for s_num in ["1", "2", "3", "4", "5", "6"]:
+                    if f"speaker_{s_num}" in lower_wf or f"화자_{s_num}" in lower_wf:
+                        speaker_num = s_num
+                        break
+                
+                is_mixed = ("multi" in folder_name.lower()) or ("speaker_" in lower_wf) or ("화자_" in lower_wf)
+
+                items.append({
+                    "wav": w_path, 
+                    "txt": t_path, 
+                    "content": t_content, 
+                    "original_content": t_content, 
+                    "deleted": False, 
+                    "folder_name": folder_name, 
+                    "wav_filename": w_f,
+                    "speaker_num": speaker_num,
+                    "is_mixed": is_mixed
+                })
             
             total_pages = int(np.ceil(len(items) / ITEMS_PER_PAGE))
             status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지)."
@@ -173,15 +191,27 @@ def run_data_refinement_webui():
             for i in range(ITEMS_PER_PAGE):
                 if i < len(page_items):
                     item = page_items[i]
-                    updates.extend([gr.update(visible=not item["deleted"]), item["wav"], item["content"], item["txt"], item["wav"]])
+                    seg_idx = i + 1
+                    if item["is_mixed"]:
+                        label_str = f"세그먼트{seg_idx}-화자{item['speaker_num']}"
+                    else:
+                        label_str = f"세그먼트 {seg_idx}"
+                        
+                    updates.extend([
+                        gr.update(visible=not item["deleted"]), 
+                        gr.update(value=item["wav"], label=label_str), 
+                        gr.update(value=item["content"], label=label_str), 
+                        item["txt"], 
+                        item["wav"]
+                    ])
                 else:
-                    updates.extend([gr.update(visible=False), None, "", "", ""])
+                    updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), "", ""])
             
             return [items, [], [], 1, status_msg, f"### 페이지: 1 / {total_pages} (총 {len(items)}개 항목)", f"### 페이지: 1 / {total_pages}", gr.update(interactive=False), gr.update(interactive=False)] + updates
 
         def render_page(items, page_num):
             if not items:
-                return [1, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + [gr.update(visible=False)] * (ITEMS_PER_PAGE * 4)
+                return [1, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), "", ""] * ITEMS_PER_PAGE
             
             total_pages = int(np.ceil(len(items) / ITEMS_PER_PAGE))
             if page_num < 1: page_num = 1
@@ -194,9 +224,21 @@ def run_data_refinement_webui():
             for i in range(ITEMS_PER_PAGE):
                 if i < len(page_items):
                     item = page_items[i]
-                    updates.extend([gr.update(visible=not item["deleted"]), item["wav"], item["content"], item["txt"], item["wav"]])
+                    global_idx = start_idx + i + 1
+                    if item.get("is_mixed", False):
+                        label_str = f"세그먼트{global_idx}-화자{item.get('speaker_num', '1')}"
+                    else:
+                        label_str = f"세그먼트 {global_idx}"
+                        
+                    updates.extend([
+                        gr.update(visible=not item["deleted"]), 
+                        gr.update(value=item["wav"], label=label_str), 
+                        gr.update(value=item["content"], label=label_str), 
+                        item["txt"], 
+                        item["wav"]
+                    ])
                 else:
-                    updates.extend([gr.update(visible=False), None, "", "", ""])
+                    updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), "", ""])
             
             return [page_num, f"### 페이지: {page_num} / {total_pages} (총 {len(items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + updates
 
@@ -237,7 +279,7 @@ def run_data_refinement_webui():
 
         def handle_single_delete(items, history, redo, page_num, item_index, *current_texts):
             if not items:
-                return [items, history, redo, "항목이 없습니다.", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update() for _ in range(ITEMS_PER_PAGE * 4)]
+                return [items, history, redo, "항목이 없습니다.", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(), gr.update(), gr.update(), "", ""] * ITEMS_PER_PAGE
             new_items = sync_current_texts(items, page_num, *current_texts)
             start_idx = (page_num - 1) * ITEMS_PER_PAGE
             global_idx = start_idx + item_index
@@ -250,14 +292,25 @@ def run_data_refinement_webui():
             for i in range(ITEMS_PER_PAGE):
                 if i < len(page_items):
                     item = page_items[i]
-                    updates.extend([gr.update(visible=not item["deleted"]), item["wav"], item["content"], item["txt"], item["wav"]])
+                    g_idx = start_idx + i + 1
+                    if item.get("is_mixed", False):
+                        label_str = f"세그먼트{g_idx}-화자{item.get('speaker_num', '1')}"
+                    else:
+                        label_str = f"세그먼트 {g_idx}"
+                    updates.extend([
+                        gr.update(visible=not item["deleted"]), 
+                        gr.update(value=item["wav"], label=label_str), 
+                        gr.update(value=item["content"], label=label_str), 
+                        item["txt"], 
+                        item["wav"]
+                    ])
                 else:
-                    updates.extend([gr.update(visible=False), None, "", "", ""])
+                    updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), "", ""])
             return [new_items, new_history, new_redo, f"세그먼트 #{global_idx+1} 삭제됨", gr.update(interactive=True), gr.update(interactive=False)] + updates
 
         def handle_undo(items, history, redo, page_num, *current_texts):
             if not history:
-                return [items, history, redo, "더 이상 되돌릴 수 없습니다.", gr.update(interactive=False), gr.update(interactive=bool(redo)), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update() for _ in range(ITEMS_PER_PAGE * 4)]
+                return [items, history, redo, "더 이상 되돌릴 수 없습니다.", gr.update(interactive=False), gr.update(interactive=bool(redo)), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update(), gr.update(), gr.update(), "", ""] * ITEMS_PER_PAGE
             current_state = sync_current_texts(items, page_num, *current_texts)
             prev_state = history[-1]
             new_history = history[:-1]
@@ -273,14 +326,25 @@ def run_data_refinement_webui():
             for i in range(ITEMS_PER_PAGE):
                 if i < len(page_items):
                     item = page_items[i]
-                    updates.extend([gr.update(visible=not item["deleted"]), item["wav"], item["content"], item["txt"], item["wav"]])
+                    g_idx = start_idx + i + 1
+                    if item.get("is_mixed", False):
+                        label_str = f"세그먼트{g_idx}-화자{item.get('speaker_num', '1')}"
+                    else:
+                        label_str = f"세그먼트 {g_idx}"
+                    updates.extend([
+                        gr.update(visible=not item["deleted"]), 
+                        gr.update(value=item["wav"], label=label_str), 
+                        gr.update(value=item["content"], label=label_str), 
+                        item["txt"], 
+                        item["wav"]
+                    ])
                 else:
-                    updates.extend([gr.update(visible=False), None, "", "", ""])
+                    updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), "", ""])
             return [prev_state, new_history, new_redo, "[안내] 이전 상태로 일괄 되돌렸습니다.", target_page, f"### 페이지: {target_page} / {total_pages} (총 {len(prev_state)}개 항목)", f"### 페이지: {target_page} / {total_pages}", gr.update(interactive=bool(new_history)), gr.update(interactive=bool(new_redo))] + updates
 
         def handle_redo(items, history, redo, page_num, *current_texts):
             if not redo:
-                return [items, history, redo, "더 이상 앞으로 돌릴 수 없습니다.", gr.update(interactive=bool(history)), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update() for _ in range(ITEMS_PER_PAGE * 4)]
+                return [items, history, redo, "더 이상 앞으로 돌릴 수 없습니다.", gr.update(interactive=bool(history)), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update(), gr.update(), gr.update(), "", ""] * ITEMS_PER_PAGE
             current_state = sync_current_texts(items, page_num, *current_texts)
             next_state = redo[-1]
             new_redo = redo[:-1]
@@ -296,9 +360,20 @@ def run_data_refinement_webui():
             for i in range(ITEMS_PER_PAGE):
                 if i < len(page_items):
                     item = page_items[i]
-                    updates.extend([gr.update(visible=not item["deleted"]), item["wav"], item["content"], item["txt"], item["wav"]])
+                    g_idx = start_idx + i + 1
+                    if item.get("is_mixed", False):
+                        label_str = f"세그먼트{g_idx}-화자{item.get('speaker_num', '1')}"
+                    else:
+                        label_str = f"세그먼트 {g_idx}"
+                    updates.extend([
+                        gr.update(visible=not item["deleted"]), 
+                        gr.update(value=item["wav"], label=label_str), 
+                        gr.update(value=item["content"], label=label_str), 
+                        item["txt"], 
+                        item["wav"]
+                    ])
                 else:
-                    updates.extend([gr.update(visible=False), None, "", "", ""])
+                    updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), "", ""])
             return [next_state, new_history, new_redo, "[안내] 작업을 앞으로 일괄 돌렸습니다.", target_page, f"### 페이지: {target_page} / {total_pages} (총 {len(next_state)}개 항목)", f"### 페이지: {target_page} / {total_pages}", gr.update(interactive=bool(new_history)), gr.update(interactive=bool(new_redo))] + updates
 
         def save_all_changes(items, history, redo, page_num, *current_texts):
@@ -377,6 +452,26 @@ def run_data_refinement_webui():
             if not speaker_name: return "[오류] 등록할 화자 이름을 입력해주세요."
             if not items: return "[오류] 로드된 세그먼트 데이터가 없습니다."
             
+            for item in items:
+                if not item["deleted"]:
+                    if item.get("is_mixed", False) and item.get("speaker_num") != "1":
+                        return "[거부 경고] 다중 화자 또는 혼입된 세그먼트가 감지되었습니다. 단일 화자 데이터로 완전히 정제한 후에만 등록할 수 있습니다."
+            
+            # [추가] 이미 등록된 화자 알고리즘이 존재하는지 확인하는 검사 로직 (안전한 속성/메소드 호출)
+            try:
+                # algorithm_handler 내에 기존 등록 여부를 체크하는 함수나 목록 조회 함수가 있을 경우 활용
+                existing_speakers = []
+                if hasattr(ah, "get_registered_speakers"):
+                    existing_speakers = ah.get_registered_speakers()
+                elif hasattr(ah, "list_speakers"):
+                    existing_speakers = ah.list_speakers()
+                
+                if existing_speakers and speaker_name in existing_speakers:
+                    print(f"[안내] '{speaker_name}' 화자는 이미 등록되어 있습니다. 기존 알고리즘 업데이트/덮어쓰기를 진행합니다.")
+            except Exception as check_err:
+                # 혹시 모를 모듈 함수 부재 시 오류 없이 통과하도록 예외 처리
+                print(f"[참고] 기존 화자 목록 확인 중 예외(무시됨): {check_err}")
+
             new_items, _, _, save_msg, _, _ = save_all_changes(items, history, redo, page_num, *current_texts)
             if "[오류]" in save_msg: return f"등록 실패: {save_msg}"
             

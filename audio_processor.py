@@ -39,7 +39,10 @@ except ImportError:
 
 TARGET_SAMPLE_RATE = 16000
 CHUNK_SIZE = 1024
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 🔥 GPU 고정 설정 (가상환경의 CUDA/GPU를 무조건 사용하도록 강제)
+DEVICE = "cuda"
+
 DEFAULT_MODEL_PATH = "Qwen/Qwen3-ASR-1.7B"
 
 AUDIO_DIR = Path("audio")
@@ -95,9 +98,8 @@ def load_asr_model():
 
     print(f"\n[*] 고성능 ASR 모델({DEFAULT_MODEL_PATH}) 로딩 중... (장치: {DEVICE})")
     try:
-        if DEVICE == "cuda":
-            torch.backends.cudnn.benchmark = True
-            torch.cuda.empty_cache()
+        torch.backends.cudnn.benchmark = True
+        torch.cuda.empty_cache()
 
         model = Qwen3ASRModel.from_pretrained(
             DEFAULT_MODEL_PATH,
@@ -162,10 +164,8 @@ def apply_uvr5_vocal_extraction(input_audio_path):
     print(f"\n[⏳ UVR5 전처리: 배경음 및 보컬 정밀 분리 중(GPU 가속 활성화)... ({base_name})]")
     
     if _uvr5_separator_instance is None:
-        # 🔥 UVR5가 확실하게 GPU(CUDA)를 사용하도록 명시적 초기화
         _uvr5_separator_instance = Separator(
             output_dir=str(target_uvr5_dir),
-            use_cuda=True if DEVICE == "cuda" else False
         )
     else:
         _uvr5_separator_instance.output_dir = str(target_uvr5_dir)
@@ -223,10 +223,8 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
             if token:
                 try:
                     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
-                    # 🔥 명시적인 GPU 디바이스 강제 할당
                     pipeline.to(torch.device(DEVICE))
                     
-                    # 🔥 Pyannote는 torch 텐서 입력 시 GPU에서 다이렉트로 연산 수행
                     tensor_audio = torch.from_numpy(audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
                     diarization = pipeline({"waveform": tensor_audio, "sample_rate": sample_rate})
                     
@@ -241,15 +239,58 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
         if not raw_speaker_turns:
             raw_speaker_turns.append((0.0, total_duration, "speaker_1"))
 
+        # 💡 [기본 분석 모드일 때] 명시된 화자가 없고 구간이 여러 개라면 피치(음역대) 기반 자동 분리 적용
+        if not active_speakers and len(raw_speaker_turns) > 1:
+            print("[*] 기본 분석 모드: 발화 구간별 피치(음역대)를 분석하여 다중 화자를 단순 자동 분류합니다.")
+            import librosa
+            
+            speaker_pitch_profiles = {}
+            turn_assigned_speakers = []
+            
+            for start, end, orig_s in raw_speaker_turns:
+                start_sample = int(start * sample_rate)
+                end_sample = int(end * sample_rate)
+                sub_audio = audio_data[start_sample:end_sample]
+                
+                if sub_audio.size < sample_rate * 0.5:
+                    turn_assigned_speakers.append((start, end, "speaker_1"))
+                    continue
+                
+                f0, voiced_flag, voiced_probs = librosa.pyin(
+                    sub_audio, 
+                    fmin=librosa.note_to_hz('C2'), 
+                    fmax=librosa.note_to_hz('C7'), 
+                    sr=sample_rate
+                )
+                valid_f0 = f0[voiced_flag & ~np.isnan(f0)]
+                mean_pitch = np.median(valid_f0) if valid_f0.size > 0 else 0.0
+                
+                matched_speaker = None
+                for spk_name, avg_p in speaker_pitch_profiles.items():
+                    if abs(mean_pitch - avg_p) < 35.0:
+                        matched_speaker = spk_name
+                        speaker_pitch_profiles[spk_name] = (avg_p + mean_pitch) / 2.0
+                        break
+                
+                if not matched_speaker:
+                    new_spk_name = f"speaker_{len(speaker_pitch_profiles) + 1}"
+                    speaker_pitch_profiles[new_spk_name] = mean_pitch
+                    matched_speaker = new_spk_name
+                
+                turn_assigned_speakers.append((start, end, matched_speaker))
+            
+            raw_speaker_turns = turn_assigned_speakers
+            print(f"[+] 피치 분석 결과 자동 분류된 화자 목록: {list(speaker_pitch_profiles.keys())}")
+
         speaker_mapping = {}
         if active_speakers and len(active_speakers) > 1:
             unique_orig_speakers = sorted({s for _, _, s in raw_speaker_turns})
             for idx, orig_s in enumerate(unique_orig_speakers):
                 speaker_mapping[orig_s] = active_speakers[idx] if idx < len(active_speakers) else f"speaker_{idx+1}"
         else:
-            s_name = active_speakers[0] if active_speakers else "speaker_1"
             for _, _, orig_speaker in raw_speaker_turns:
-                speaker_mapping[orig_speaker] = s_name
+                if orig_speaker not in speaker_mapping:
+                    speaker_mapping[orig_speaker] = orig_speaker if not active_speakers else active_speakers[0]
 
         print("\n[⏳ 2단계: 각 구간별 개별 ASR 인식 및 세그먼트 저장 시작]")
         all_full_texts = []
@@ -319,7 +360,7 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
 def configure_strict_analysis_pipeline(audio_data, sample_rate):
     while True:
         print("\n==============================================")
-        print("              음원 분석 모드 선택")
+        print("            음원 분석 모드 선택")
         print("============================================== ")
         print(" 0. 기본 분석")
         print(" 1. 단일 화자 알고리즘 분석")
@@ -696,7 +737,7 @@ if __name__ == "__main__":
 
     while True:
         print("\n==============================================")
-        print("         Voice Script Helper (메인)")
+        print("          Voice Script Helper (메인)")
         print("============================================== ")
         print(" 1. 브라우저 오디오 녹화 및 자동 분석")
         print(" 2. 기존 오디오 파일 선택 및 분석")
