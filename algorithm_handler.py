@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 import librosa
+from functools import lru_cache
 
 STORAGE_DIR = "saved_algorithms"
 
@@ -12,7 +13,8 @@ def load_existing_profiles():
     ensure_handler_directories()
     if not os.path.exists(STORAGE_DIR):
         return []
-    return [os.path.splitext(f)[0] for f in os.listdir(STORAGE_DIR) if f.endswith(".json")]
+    # 리스트 컴프리헨션 최적화 및 확장자 필터링 정돈
+    return [f[:-5] for f in os.listdir(STORAGE_DIR) if f.endswith(".json")]
 
 def register_or_update_algorithm(algo_name, audio_path, corrected_text, raw_stt_text=""):
     ensure_handler_directories()
@@ -94,10 +96,6 @@ def apply_text_corrections(text, algo_name):
         return text
 
 def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_ratio=0.3):
-    """
-    노이즈나 이종 음성이 섞여 있더라도 전체 피치 중 일정 비율(required_ratio) 이상이 
-    허용 오차 범위 내에 포함되면 유연하게 일치하는 것으로 판정합니다.
-    """
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     if not os.path.exists(file_path):
         return False
@@ -118,11 +116,9 @@ def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_
     min_p = global_range["min"] - tolerance
     max_p = global_range["max"] + tolerance
 
-    # 허용 범위 내에 속하는 피치 포인트의 비율 계산
     matching_points = np.sum((pitch_values >= min_p) & (pitch_values <= max_p))
     match_ratio = float(matching_points) / float(len(pitch_values))
 
-    # 설정된 비율 이상이거나, 전체 평균 피치가 범위 내에 들어오면 통과
     mean_pitch = np.mean(pitch_values)
     is_mean_in_range = (global_range["min"] - tolerance <= mean_pitch <= global_range["max"] + tolerance)
 
@@ -132,9 +128,6 @@ def verify_single_speaker(algo_name, audio_path):
     return verify_pitch_match_flexible(algo_name, audio_path)
 
 def verify_multi_speakers_auto(audio_path):
-    """
-    다중 화자 자동 검증: 등록된 프로파일 중 하나라도 유연한 피치 매칭 조건을 만족하면 통과합니다.
-    """
     existing_profiles = load_existing_profiles()
     if not existing_profiles:
         return False, "등록된 알고리즘 프로파일이 없습니다."

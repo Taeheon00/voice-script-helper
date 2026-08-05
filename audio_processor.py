@@ -41,10 +41,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 DEFAULT_MODEL_PATH = "Qwen/Qwen3-ASR-1.7B"
 
-# 📁 폴더 구조 정의
+# 📁 폴더 구조 정의 (사용자 요구사항 반영)
 AUDIO_DIR = "audio"
+MANUAL_UVR5_DIR = os.path.join(AUDIO_DIR, "uvr5")
+
 AUTO_REC_DIR = os.path.join(AUDIO_DIR, "auto_recorded_audio")
-UVR5_OUTPUT_DIR = os.path.join(AUTO_REC_DIR, "uvr5")
+AUTO_UVR5_DIR = os.path.join(AUTO_REC_DIR, "uvr5")
 
 SEGMENTS_BASE_DIR = "segments_base"
 ASR_DIR = "asr_output"
@@ -55,8 +57,12 @@ TOKEN_FILE = "hf_token.txt"
 audio_queue = queue.Queue()
 is_recording = False
 
+# 🚀 최적화 캐시 변수 (중복 로딩 방지용 싱글톤)
+_cached_asr_model = None
+_uvr5_separator_instance = None
+
 def ensure_directories():
-    for d in [AUDIO_DIR, AUTO_REC_DIR, UVR5_OUTPUT_DIR, SEGMENTS_BASE_DIR, ASR_DIR, POST_DIR, ERROR_LOG_DIR]:
+    for d in [AUDIO_DIR, MANUAL_UVR5_DIR, AUTO_REC_DIR, AUTO_UVR5_DIR, SEGMENTS_BASE_DIR, ASR_DIR, POST_DIR, ERROR_LOG_DIR]:
         if not os.path.exists(d):
             os.makedirs(d)
     ah.ensure_handler_directories()
@@ -101,13 +107,23 @@ def clean_hallucination_text(text):
     return text.strip()
 
 def load_asr_model():
+    global _cached_asr_model
+    if _cached_asr_model is not None:
+        print("[*] 이미 메모리에 로드된 ASR 모델을 재사용합니다.")
+        return _cached_asr_model
+
     print(f"\n[*] 고성능 ASR 모델({DEFAULT_MODEL_PATH}) 로딩 중... (장치: {DEVICE})")
     try:
+        if DEVICE == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.cuda.empty_cache()
+
         model = Qwen3ASRModel.from_pretrained(
             DEFAULT_MODEL_PATH,
             dtype=torch.float16,
             device_map=DEVICE
         )
+        _cached_asr_model = model
         print("[+] ASR 모델 로드 완료!")
         return model
     except Exception as e:
@@ -138,32 +154,51 @@ def save_wav_chunk(audio_data, sample_rate, filename):
         print(f"[경고] 세그먼트 WAV 저장 실패: {e}")
 
 def apply_uvr5_vocal_extraction(input_audio_path):
+    global _uvr5_separator_instance
     if not HAS_UVR5:
         raise RuntimeError("audio-separator 패키지가 설치되어 있지 않아 UVR5 분리를 수행할 수 없습니다.")
 
     ensure_directories()
+    
+    # 🔍 사용자 요구사항에 따른 경로 분기 처리
+    # auto_recorded_audio 폴더 안의 파일이면 -> audio/auto_recorded_audio/uvr5/ 에 저장
+    # 그 외(일반 실시간 녹화 또는 메뉴 2 파일 분석 등 audio/ 최상위 파일)면 -> audio/uvr5/ 에 저장
+    abs_input_path = os.path.abspath(input_audio_path)
+    abs_auto_dir = os.path.abspath(AUTO_REC_DIR)
+    
+    if abs_input_path.startswith(abs_auto_dir):
+        target_uvr5_dir = AUTO_UVR5_DIR
+    else:
+        target_uvr5_dir = MANUAL_UVR5_DIR
+
+    if not os.path.exists(target_uvr5_dir):
+        os.makedirs(target_uvr5_dir)
+
     base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
     print(f"\n[⏳ UVR5 전처리: 고성능 모델(Voc_FT)로 배경음 및 보컬 정밀 분리 중... ({base_name})]")
     
-    separator = Separator(output_dir=UVR5_OUTPUT_DIR)
-    separator.load_model('UVR-MDX-NET-Voc_FT.onnx')
-    output_files = separator.separate(input_audio_path)
+    if _uvr5_separator_instance is None:
+        _uvr5_separator_instance = Separator()
+    
+    _uvr5_separator_instance.output_dir = target_uvr5_dir
+    _uvr5_separator_instance.load_model('UVR-MDX-NET-Voc_FT.onnx')
+        
+    output_files = _uvr5_separator_instance.separate(input_audio_path)
     
     vocal_file = None
-    
     for f in output_files:
         f_lower = f.lower()
-        full_path = os.path.join(UVR5_OUTPUT_DIR, f)
+        full_path = os.path.join(target_uvr5_dir, f)
         if "vocals" in f_lower:
             new_vocal_name = f"{base_name}_Vocals.wav"
-            new_vocal_path = os.path.join(UVR5_OUTPUT_DIR, new_vocal_name)
+            new_vocal_path = os.path.join(target_uvr5_dir, new_vocal_name)
             if os.path.exists(full_path):
                 if os.path.exists(new_vocal_path): os.remove(new_vocal_path)
                 os.rename(full_path, new_vocal_path)
             vocal_file = new_vocal_path
         elif "instrumental" in f_lower or "background" in f_lower or "no_vocals" in f_lower:
             new_inst_name = f"{base_name}_Instrumental.wav"
-            new_inst_path = os.path.join(UVR5_OUTPUT_DIR, new_inst_name)
+            new_inst_path = os.path.join(target_uvr5_dir, new_inst_name)
             if os.path.exists(full_path):
                 if os.path.exists(new_inst_path): os.remove(new_inst_path)
                 os.rename(full_path, new_inst_path)
@@ -387,6 +422,29 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
             print("[오류] 올바른 번호를 입력해주세요.")
 
 def execute_analysis_flow(model, target_file):
+    # 1. 원본 오디오 파일 로드
+    try:
+        with wave.open(target_file, 'rb') as wf:
+            sr = wf.getframerate()
+            n_channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            frames = wf.readframes(wf.getnframes())
+            audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
+            if n_channels > 1:
+                audio_data = np.mean(audio_data.reshape(-1, n_channels), axis=1)
+
+        audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
+    except Exception as e:
+        write_error_log("오디오 파일 로드 단계", e)
+        print(f"\n[오류] 오디오 파일을 읽어오는 중 문제가 발생했습니다: {e}")
+        return
+
+    # 2. UVR5 분리 전에 [음원 분석 모드 선택] 메뉴를 먼저 출력하고 사용자 선택 받기
+    active_speakers, is_single = configure_strict_analysis_pipeline(audio_data, TARGET_SAMPLE_RATE)
+    if active_speakers is None:
+        return
+
+    # 3. 분석 모드 선택 후, UVR5 보컬 분리 수행 (정해진 폴더 규칙 적용)
     try:
         processed_vocal_path = apply_uvr5_vocal_extraction(target_file)
     except Exception as e:
@@ -394,21 +452,19 @@ def execute_analysis_flow(model, target_file):
         print(f"\n[🚫 분석 차단] UVR5 분리 과정 오류로 작업을 중단합니다.\n[상세 오류]: {e}")
         return
 
+    # 4. 분리된 보컬 파일 로드 후 ASR 파이프라인 진행
     with wave.open(processed_vocal_path, 'rb') as wf:
         sr = wf.getframerate()
         n_channels = wf.getnchannels()
         sample_width = wf.getsampwidth()
         frames = wf.readframes(wf.getnframes())
-        audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
+        vocal_audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(frames, dtype=np.float32)
         if n_channels > 1:
-            audio_data = np.mean(audio_data.reshape(-1, n_channels), axis=1)
+            vocal_audio_data = np.mean(vocal_audio_data.reshape(-1, n_channels), axis=1)
 
-    audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
-    active_speakers, is_single = configure_strict_analysis_pipeline(audio_data, TARGET_SAMPLE_RATE)
-    if active_speakers is None:
-        return
+    vocal_audio_data = resample_audio(vocal_audio_data, sr, TARGET_SAMPLE_RATE)
 
-    process_audio_pipeline(model, audio_data, TARGET_SAMPLE_RATE, source_identifier=processed_vocal_path, active_speakers=active_speakers, is_single_speaker_target=is_single)
+    process_audio_pipeline(model, vocal_audio_data, TARGET_SAMPLE_RATE, source_identifier=processed_vocal_path, active_speakers=active_speakers, is_single_speaker_target=is_single)
 
 def record_and_transcribe(model):
     global is_recording
@@ -471,7 +527,6 @@ def record_and_transcribe(model):
     is_recording = True
     start_time = time.time()
     
-    # 5분 단위 분할 고정 (300초)
     SPLIT_INTERVAL_SECONDS = 300.0
     saved_file_paths = []
     
@@ -501,14 +556,20 @@ def record_and_transcribe(model):
             raw_audio = np.mean(raw_audio.reshape(-1, channels), axis=1)
         
         ensure_directories()
-        temp_recorded_path = get_next_audio_filename(AUTO_REC_DIR, "wav")
+        
+        # 📂 저장 경로 분기 규칙 적용
+        # rec_mode가 "2"(자동 녹화)이면 audio/auto_recorded_audio/ 에 저장
+        # rec_mode가 "1"(실시간 녹화)이면 audio/ 에 저장
+        target_dir = AUTO_REC_DIR if rec_mode == "2" else AUDIO_DIR
+        
+        temp_recorded_path = get_next_audio_filename(target_dir, "wav")
         scaled_audio = np.clip(raw_audio * 32767, -32768, 32767).astype(np.int16)
         with wave.open(temp_recorded_path, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(native_sr)
             wf.writeframes(scaled_audio.tobytes())
-        print(f"\n[💾 5분 단위 분할 오디오 저장 완료] {temp_recorded_path}")
+        print(f"\n[💾 오디오 파일 저장 완료] {temp_recorded_path}")
         saved_file_paths.append(temp_recorded_path)
 
     try:
@@ -557,15 +618,25 @@ def record_and_transcribe(model):
         print("\n[알림] 녹음된 오디오가 없습니다.")
         return
 
-    # 💡 녹화 직후 자동 분석 실행 루프를 제거하고 저장 완료 메시지만 출력 후 메뉴로 복귀하도록 수정
+    target_save_loc = AUTO_REC_DIR if rec_mode == "2" else AUDIO_DIR
     print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
-    print(f"[*] 저장 위치: {AUTO_REC_DIR}/")
-    print("[*] 2번 메뉴(파일 분석)에서 저장된 파일을 선택하여 분석 모드를 진행해 주세요.")
+    print(f"[*] 저장 위치: {target_save_loc}/")
+    
+    # 메뉴 1번 흐름: 녹화가 끝나면 곧바로 분석 흐름(분석 메뉴 선택 ➔ UVR5 ➔ ASR)으로 연계
+    print(f"\n[*] 녹화된 파일에 대한 분석 모드를 시작합니다.")
+    for target_file in saved_file_paths:
+        print(f"\n----------------------------------------------")
+        print(f"[*] 대상 파일 분석 시작: {target_file}")
+        print(f"----------------------------------------------")
+        execute_analysis_flow(model, target_file)
 
 def select_and_process_audio_file(model):
     ensure_directories()
     files = []
     for root, dirs, filenames in os.walk(AUDIO_DIR):
+        # auto_recorded_audio 폴더 내의 파일은 메뉴 2번 파일 분석 리스트에서 제외 (메뉴 1 자동녹화 전용)
+        if AUTO_REC_DIR in root:
+            continue
         for f in filenames:
             if f.lower().endswith('.wav') and not "vocal" in f.lower() and not "instrumental" in f.lower():
                 files.append(os.path.join(root, f))
