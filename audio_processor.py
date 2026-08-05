@@ -135,7 +135,6 @@ def save_wav_chunk(audio_data, sample_rate, filename):
         print(f"[경고] 세그먼트 WAV 저장 실패: {e}")
 
 def format_time(seconds):
-    """초(second) 단위를 입력받아 시:분:초 또는 분:초 형태로 보기 쉽게 변환합니다."""
     if seconds < 60:
         return f"{seconds:.1f}초"
     elif seconds < 3600:
@@ -160,12 +159,17 @@ def apply_uvr5_vocal_extraction(input_audio_path):
     target_uvr5_dir.mkdir(parents=True, exist_ok=True)
 
     base_name = abs_input_path.stem
-    print(f"\n[⏳ UVR5 전처리: 배경음 및 보컬 정밀 분리 중... ({base_name})]")
+    print(f"\n[⏳ UVR5 전처리: 배경음 및 보컬 정밀 분리 중(GPU 가속 활성화)... ({base_name})]")
     
     if _uvr5_separator_instance is None:
-        _uvr5_separator_instance = Separator()
-    
-    _uvr5_separator_instance.output_dir = str(target_uvr5_dir)
+        # 🔥 UVR5가 확실하게 GPU(CUDA)를 사용하도록 명시적 초기화
+        _uvr5_separator_instance = Separator(
+            output_dir=str(target_uvr5_dir),
+            use_cuda=True if DEVICE == "cuda" else False
+        )
+    else:
+        _uvr5_separator_instance.output_dir = str(target_uvr5_dir)
+        
     _uvr5_separator_instance.load_model('UVR-MDX-NET-Voc_FT.onnx')
         
     output_files = _uvr5_separator_instance.separate(str(abs_input_path))
@@ -210,7 +214,7 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
         specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
         specific_segment_dir.mkdir(parents=True, exist_ok=True)
 
-        print("\n[⏳ 1단계: 화자 분리(Diarization) 수행 중...]")
+        print("\n[⏳ 1단계: 화자 분리(Diarization) 수행 중(GPU 가속 적용)...]")
         total_duration = audio_data.shape[0] / sample_rate
         
         raw_speaker_turns = []
@@ -219,8 +223,11 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
             if token:
                 try:
                     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+                    # 🔥 명시적인 GPU 디바이스 강제 할당
                     pipeline.to(torch.device(DEVICE))
-                    tensor_audio = torch.from_numpy(audio_data).unsqueeze(0).to(torch.float32)
+                    
+                    # 🔥 Pyannote는 torch 텐서 입력 시 GPU에서 다이렉트로 연산 수행
+                    tensor_audio = torch.from_numpy(audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
                     diarization = pipeline({"waveform": tensor_audio, "sample_rate": sample_rate})
                     
                     annotation = getattr(diarization, "speaker_diarization", diarization)
@@ -286,7 +293,6 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
                 save_wav_chunk(chunk_audio, sample_rate, seg_wav_filename)
                 seg_txt_filename.write_text(chunk_txt, encoding="utf-8")
 
-                # 보기 편하게 포맷팅 함수 적용
                 start_str = format_time(start)
                 end_str = format_time(end)
 
@@ -547,7 +553,6 @@ def record_and_transcribe(model):
 
     print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
     
-    # 🔥 첫 번째 파일을 기준으로 샘플레이트/오디오 성향을 확인하여 분석 모드 선택을 단 한 번만 수행
     with wave.open(saved_file_paths[0], 'rb') as wf:
         sr = wf.getframerate()
         n_channels = wf.getnchannels()
@@ -639,7 +644,6 @@ def select_and_process_audio_file(model):
                 print(f"\n[알림] 선택한 폴더 내에 분석할 WAV 파일이 없습니다.")
                 continue
                 
-            # 🔥 자동녹화 폴더 선택 시에도 분석 모드를 최초에 한 번만 물어봄
             with wave.open(str(session_wavs[0]), 'rb') as wf:
                 sr = wf.getframerate()
                 n_channels = wf.getnchannels()
@@ -668,7 +672,6 @@ def select_and_process_audio_file(model):
                 continue
             target_file = normal_files[idx_val]
             
-            # 단일 일반 파일 선택 시
             with wave.open(str(target_file), 'rb') as wf:
                 sr = wf.getframerate()
                 n_channels = wf.getnchannels()
