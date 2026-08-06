@@ -25,6 +25,13 @@ from qwen_asr import Qwen3ASRModel
 import pyaudiowpatch as pyaudio
 import algorithm_handler as ah
 
+# 💡 브라우저 프로세스 전용 캡처를 위한 라이브러리 (pip install proctap 필요)
+try:
+    from proctap import ProcessCapture
+    HAS_PROCTAP = True
+except ImportError:
+    HAS_PROCTAP = False
+
 try:
     from audio_separator.separator import Separator
     HAS_UVR5 = True
@@ -239,7 +246,6 @@ def process_audio_pipeline(model, audio_data, sample_rate, source_identifier="au
         if not raw_speaker_turns:
             raw_speaker_turns.append((0.0, total_duration, "speaker_1"))
 
-        # 💡 [기본 분석 모드일 때] 명시된 화자가 없고 구간이 여러 개라면 피치(음역대) 기반 자동 분리 적용
         if not active_speakers and len(raw_speaker_turns) > 1:
             print("[*] 기본 분석 모드: 발화 구간별 피치(음역대)를 분석하여 다중 화자를 단순 자동 분류합니다.")
             import librosa
@@ -457,42 +463,32 @@ def record_and_transcribe(model):
             print("[오류] 올바른 숫자를 입력해주세요. 직접 녹화 종료 모드로 전환합니다.")
             rec_mode = "1"
 
-    p = pyaudio.PyAudio()
-    try:
-        wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-        default_speakers = p.get_device_info_by_index(wasapi_info['defaultOutputDevice'])
-        
-        loopback_device = None
-        if not default_speakers.get("isLoopbackDevice", False):
-            for loopback in p.get_loopback_device_info_generator():
-                if default_speakers['name'] in loopback['name']:
-                    loopback_device = loopback
-                    break
-            if loopback_device is None:
-                loopback_device = next(p.get_loopback_device_info_generator())
-        else:
-            loopback_device = default_speakers
-            
-        native_sr = int(loopback_device['defaultSampleRate'])
-        channels = loopback_device['maxInputChannels']
-        print(f"[*] 브라우저 오디오 루프백 캡처 장치 확정: [{loopback_device['name']}] (샘플레이트: {native_sr}Hz)")
-    except Exception as e:
-        print(f"[오류] 브라우저 루프백 장치 설정 실패: {e}")
-        p.terminate()
+    # 💡 브라우저 프로세스 전용 캡처 모듈 초기화 확인
+    if not HAS_PROCTAP:
+        print("\n[오류] 'proctap' 라이브러리가 설치되어 있지 않습니다.")
+        print("설치 명령어: pip install proctap")
         return
 
-    print(f"\n[*] 준비되었습니다.\n💡 브라우저 소리만 녹화됩니다.")
+    print("\n[*] 실행 중인 웹 브라우저(chrome.exe, msedge.exe 등)의 오디오만 선택합니다.")
+    target_process_name = input("대상 브라우저 프로세스 이름 입력 [기본: chrome.exe]: ").strip()
+    if not target_process_name:
+        target_process_name = "chrome.exe"
+
+    native_sr = TARGET_SAMPLE_RATE
+    channels = 1
+    print(f"[*] 타겟 브라우저 프로세스 [{target_process_name}] 오디오 캡처 준비 완료")
+
+    print(f"\n[*] 준비되었습니다.\n💡 다른 프로그램 소리는 무시하고 브라우저 소리만 자동 격리 녹화됩니다.")
     if rec_mode == "1":
-        input("👉 소리가 나는 상태에서 엔터(Enter) 키를 누르면 녹화가 시작됩니다...")
-        print(f"\n[🔴 브라우저 녹화 중...] (끝내려면 Enter)")
+        input("👉 브라우저에서 소리가 나는 상태에서 엔터(Enter) 키를 누르면 녹화가 시작됩니다...")
+        print(f"\n[🔴 브라우저 격리 녹화 중...] (끝내려면 Enter)")
     else:
         input(f"👉 엔터를 누르면 [{min_input}분] 동안 자동 녹화가 시작됩니다.")
-        print(f"\n[🔴 브라우저 자동 녹화 중...] (목표 시간: {min_input}분)")
+        print(f"\n[🔴 브라우저 격리 자동 녹화 중...] (목표 시간: {min_input}분)")
 
     stop_event = threading.Event()
     audio_queue = queue.Queue()
     buffer = []
-    is_recording_flag = True
     start_time = time.time()
     
     SPLIT_INTERVAL_SECONDS = 300.0
@@ -505,29 +501,31 @@ def record_and_transcribe(model):
         current_auto_session_dir = AUTO_REC_DIR / f"auto_recorded_{len(existing_subdirs) + 1:03d}"
         current_auto_session_dir.mkdir(parents=True, exist_ok=True)
 
-    def audio_callback(in_data, frame_count, time_info, status):
-        if is_recording_flag:
-            audio_queue.put(in_data)
-        return (None, pyaudio.paContinue)
+    # 💡 ProcessCapture를 이용한 특정 앱 프로세스 루프백 스트림 가동
+    try:
+        capture_session = ProcessCapture(process_name=target_process_name, sample_rate=native_sr)
+        capture_session.start()
+    except Exception as e:
+        print(f"[오류] 브라우저 프로세스 캡처 시작 실패 (해당 브라우저가 실행 중인지 확인하세요): {e}")
+        return
 
-    stream = p.open(
-        format=pyaudio.paFloat32,
-        channels=channels,
-        rate=native_sr,
-        input=True,
-        input_device_index=loopback_device['index'],
-        frames_per_buffer=CHUNK_SIZE,
-        stream_callback=audio_callback
-    )
-    stream.start_stream()
+    def capture_worker():
+        while not stop_event.is_set():
+            try:
+                chunk = capture_session.read(CHUNK_SIZE)
+                if chunk is not None and len(chunk) > 0:
+                    audio_queue.put(chunk)
+            except Exception:
+                time.sleep(0.01)
+
+    worker_thread = threading.Thread(target=capture_worker, daemon=True)
+    worker_thread.start()
     threading.Thread(target=lambda: (input(), stop_event.set()), daemon=True).start()
 
     def save_current_buffer(current_buf):
         if not current_buf:
             return
         raw_audio = np.concatenate(current_buf, axis=0)
-        if channels > 1:
-            raw_audio = np.mean(raw_audio.reshape(-1, channels), axis=1)
         
         target_dir = current_auto_session_dir if rec_mode == "2" else AUDIO_DIR
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -541,7 +539,7 @@ def record_and_transcribe(model):
             wf.setsampwidth(2)
             wf.setframerate(native_sr)
             wf.writeframes(scaled_audio.tobytes())
-        print(f"\n[💾 오디오 파일 저장 완료] {temp_recorded_path}")
+        print(f"\n[💾 브라우저 전용 오디오 파일 저장 완료] {temp_recorded_path}")
         saved_file_paths.append(str(temp_recorded_path))
 
     try:
@@ -573,16 +571,17 @@ def record_and_transcribe(model):
             gauge = "█" * filled_length + "-" * (bar_length - filled_length)
 
             elapsed_str = format_time(elapsed)
-            sys.stdout.write(f"\r[🔴 녹화 중] 시간: {elapsed_str} | 신호 [{gauge}] (종료: Enter)")
+            sys.stdout.write(f"\r[🔴 브라우저 격리 녹화 중] 시간: {elapsed_str} | 신호 [{gauge}] (종료: Enter)")
             sys.stdout.flush()
             time.sleep(0.1)
     except Exception as e:
         print(f"\n[경고] 녹화 루프 중 예외 발생: {e}")
     finally:
-        is_recording_flag = False
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        stop_event.set()
+        try:
+            capture_session.stop()
+        except Exception:
+            pass
         print()
 
     if buffer:
@@ -592,7 +591,7 @@ def record_and_transcribe(model):
         print("\n[알림] 녹음된 오디오가 없습니다.")
         return
 
-    print(f"\n[+ 성공] 모든 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
+    print(f"\n[+ 성공] 모든 브라우저 녹화 파일 저장 완료! (총 {len(saved_file_paths)}개 파일)")
     
     with wave.open(saved_file_paths[0], 'rb') as wf:
         sr = wf.getframerate()
@@ -737,7 +736,7 @@ if __name__ == "__main__":
 
     while True:
         print("\n==============================================")
-        print("          Voice Script Helper (메인)")
+        print("         Voice Script Helper (메인)")
         print("============================================== ")
         print(" 1. 브라우저 오디오 녹화 및 자동 분석")
         print(" 2. 기존 오디오 파일 선택 및 분석")
