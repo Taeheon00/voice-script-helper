@@ -1,7 +1,11 @@
 import os
+import re
 import numpy as np
 import gradio as gr
 import algorithm_handler as ah
+from error_logger import log_error, log_info
+
+MODULE_NAME = "RefinementStudioUI"
 
 SEGMENTS_BASE_DIR = "segments_base"
 ITEMS_PER_PAGE = 10
@@ -13,11 +17,13 @@ def get_single_speaker_folders():
     try:
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
-                if d.startswith("seg_single") or "single" in d.lower() or "단일" in d:
+                d_lower = d.lower()
+                # 단일 화자 폴더 및 제목 생성 규칙 검사 (구조 기반 검증 적용)
+                if d_lower.startswith("seg_single") or "single" in d_lower or "단일" in d or check_custom_single_format(d_lower)[0]:
                     rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
                     folders.append(rel_path)
     except Exception as e:
-        print(f"[경고] 단일 화자 폴더 탐색 중 예외 발생: {e}")
+        log_error(MODULE_NAME, "단일 화자 폴더 탐색 중 예외 발생", e)
     return folders
 
 def get_basic_segment_folders():
@@ -31,14 +37,89 @@ def get_basic_segment_folders():
                     rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
                     folders.append(rel_path)
     except Exception as e:
-        print(f"[경고] 기본 분석 폴더 탐색 중 예외 발생: {e}")
+        log_error(MODULE_NAME, "기본 분석 폴더 탐색 중 예외 발생", e)
     return folders
 
 def clone_items(items):
     return [item.copy() for item in items]
 
+def check_custom_single_format(filename_or_foldername):
+    """
+    [핵심 공통 판정 함수]
+    seg_sub_000_A_홍길동_170.0s-174.5s 구조를 기준으로,
+    가변적인 숫자나 이름 부분을 건너뛰고 정해진 위치(자릿수/인덱스)에 
+    단일 화자 커스텀 식별자 'A'가 정확히 위치하는지 구조적으로 판정합니다.
+    """
+    if not filename_or_foldername:
+        return False, "1"
+        
+    cleaned = os.path.splitext(filename_or_foldername)[0].lower()
+    parts = cleaned.split("_")
+    
+    # 1. 표준 구조 패턴 검사: seg_sub_{번호}_{화자위치}_{이름}_{시간}
+    # 예: seg_sub_000_a_홍길동_170.0s-174.5s -> 총 6개 이상의 파트로 구성
+    if len(parts) >= 5 and parts[0] == "seg" and parts[1] == "sub":
+        # 세그먼트 번호 파트(parts[2])는 가변 숫자임.
+        # 정확히 세 번째 인덱스(parts[3]) 위치에 'a'가 단독으로 오거나 커스텀 화자 규격일 때 단일 화자로 판정
+        speaker_slot = parts[3]
+        if speaker_slot == "a":
+            # 화자 번호나 이름 파트 추출 (존재한다면 다음 파트 활용 가능)
+            speaker_num = "1"
+            return True, speaker_num
+            
+    # 2. 폴더명이 직접 커스텀 규격인 경우 대비 구조 체크 (예: a_폴더명 등)
+    if len(parts) > 0 and parts[0] == "a":
+        return True, "1"
+        
+    return False, "1"
+
+def inspect_all_files(target_dir):
+    """
+    폴더 내 모든 파일의 쌍(wav/txt)과 전체 구조 기반 명명 규칙을 
+    전수 검사하는 전체 파일 검사 함수입니다.
+    """
+    if not os.path.exists(target_dir):
+        return False, "존재하지 않는 폴더입니다."
+    
+    try:
+        files = os.listdir(target_dir)
+        wav_files = [f for f in files if f.lower().endswith('.wav')]
+        
+        if not wav_files:
+            return False, "해당 폴더에 WAV 파일이 없습니다."
+            
+        issues = []
+        for w_f in wav_files:
+            base_name = os.path.splitext(w_f)[0]
+            t_path = os.path.join(target_dir, f"{base_name}.txt")
+            
+            # 1. 대응하는 txt 파일 존재 여부 검사
+            if not os.path.exists(t_path):
+                issues.append(f"누락된 텍스트 파일: {base_name}.txt")
+                
+            lower_wf = w_f.lower()
+            
+            # 2. 공통 구조 판정 함수를 통해 정확한 위치의 'A' 및 생성 규칙 검증
+            is_custom_single, _ = check_custom_single_format(lower_wf)
+            
+            # 기존 정규식 패턴 (다중 화자 등 표준 패턴)
+            pattern = r"^seg_sub_\d+_(speaker_\d+|화자_\d+)_\d+(?:\.\d+)?s-\d+(?:\.\d+)?s\.wav$"
+            is_match_pattern = bool(re.match(pattern, lower_wf))
+            
+            if not is_custom_single and not is_match_pattern:
+                issues.append(f"명명 규칙 및 구조 위치 불일치 파일: {w_f}")
+                
+        if issues:
+            return False, f"전체 검사 실패 (총 {len(issues)}개 문제 발견):\n" + "\n".join(issues[:3])
+        
+        # 통과 시 문구를 출력하지 않도록 빈 문자열 반환
+        return True, ""
+    except Exception as e:
+        log_error(MODULE_NAME, "전체 파일 검사 중 예외 발생", e)
+        return False, f"검사 중 오류 발생: {e}"
+
 def run_data_refinement_webui():
-    print("\n[*] 데이터 정제 Web UI 스튜디오를 실행합니다...")
+    log_info(MODULE_NAME, "데이터 정제 Web UI 스튜디오를 실행합니다...")
     
     single_folders = get_single_speaker_folders()
     basic_folders = get_basic_segment_folders()
@@ -74,9 +155,9 @@ def run_data_refinement_webui():
             with gr.Column(scale=1):
                 register_algo_btn = gr.Button("🚀 화자 알고리즘 등록/업데이트", variant="primary")
 
-        state_items = gr.State([])      
+        state_items = gr.State([])    
         state_history = gr.State([])    
-        state_redo = gr.State([])       
+        state_redo = gr.State([])        
         state_page = gr.State(1)        
 
         info_box = gr.Textbox(label="현재 진행 상황", value="작업할 폴더를 선택하고 '불러오기' 버튼을 누르세요.", interactive=False)
@@ -137,12 +218,19 @@ def run_data_refinement_webui():
                 return [[], [], [], 1, "폴더가 선택되지 않았습니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
             
             target_dir = os.path.join(SEGMENTS_BASE_DIR, folder_name)
+            
+            # 전체 파일 검사 기능 실행 연동
+            is_valid, inspect_msg = inspect_all_files(target_dir)
+            if not is_valid:
+                log_error(MODULE_NAME, f"전체 파일 검사 경고: {inspect_msg}", None)
+
             if not os.path.exists(target_dir):
                 return [[], [], [], 1, "존재하지 않는 폴더입니다.", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
                 
             try:
                 wav_files = sorted([f for f in os.listdir(target_dir) if f.lower().endswith('.wav')])
             except Exception as e:
+                log_error(MODULE_NAME, f"디렉토리 읽기 오류 ({target_dir})", e)
                 return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), "", "", ""] * ITEMS_PER_PAGE
 
             if not wav_files:
@@ -159,17 +247,36 @@ def run_data_refinement_webui():
                     try:
                         with open(t_path, "r", encoding="utf-8") as tf:
                             t_content = tf.read().strip()
-                    except Exception:
+                    except Exception as e:
+                        log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({t_path})", e)
                         t_content = ""
                 
-                speaker_num = "1"
                 lower_wf = w_f.lower()
-                for s_num in ["1", "2", "3", "4", "5", "6"]:
-                    if f"speaker_{s_num}" in lower_wf or f"화자_{s_num}" in lower_wf:
-                        speaker_num = s_num
-                        break
                 
-                is_mixed = ("multi" in folder_name.lower()) or ("speaker_" in lower_wf) or ("화자_" in lower_wf)
+                pattern = r"^seg_sub_\d+_(speaker_\d+|화자_\d+)_\d+(?:\.\d+)?s-\d+(?:\.\d+)?s\.wav$"
+                match = re.match(pattern, lower_wf)
+                
+                speaker_num = "1"
+                is_mixed = True
+                
+                if match:
+                    speaker_group = match.group(1)
+                    num_match = re.search(r"\d+", speaker_group)
+                    if num_match:
+                        speaker_num = num_match.group(0)
+                    
+                    if "speaker_0" in speaker_group or "화자_0" in speaker_group:
+                        is_mixed = False
+                    else:
+                        is_mixed = True
+                else:
+                    is_mixed = True
+
+                is_folder_custom_single, _ = check_custom_single_format(folder_name)
+                is_file_custom_single, _ = check_custom_single_format(lower_wf)
+
+                if is_folder_custom_single or is_file_custom_single:
+                    is_mixed = False
 
                 items.append({
                     "wav": w_path, 
@@ -184,7 +291,12 @@ def run_data_refinement_webui():
                 })
             
             total_pages = int(np.ceil(len(items) / ITEMS_PER_PAGE))
-            status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지)."
+            
+            # 검사 통과 시 문구를 제외하고 로드 완료 메시지만 깔끔하게 출력
+            if inspect_msg:
+                status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지). [{inspect_msg}]"
+            else:
+                status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지)."
             
             updates = []
             page_items = items[:ITEMS_PER_PAGE]
@@ -393,6 +505,7 @@ def run_data_refinement_webui():
                         surviving_items.append(item)
                 return [surviving_items, [], [], "[성공] 변경사항이 저장되었습니다.", gr.update(interactive=False), gr.update(interactive=False)]
             except Exception as e:
+                log_error(MODULE_NAME, "변경사항 일괄 저장 실패", e)
                 return [items, history, redo, f"[오류] 일괄 저장 실패: {e}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))]
 
         refresh_btn.click(
@@ -457,9 +570,7 @@ def run_data_refinement_webui():
                     if item.get("is_mixed", False) and item.get("speaker_num") != "1":
                         return "[거부 경고] 다중 화자 또는 혼입된 세그먼트가 감지되었습니다. 단일 화자 데이터로 완전히 정제한 후에만 등록할 수 있습니다."
             
-            # [추가] 이미 등록된 화자 알고리즘이 존재하는지 확인하는 검사 로직 (안전한 속성/메소드 호출)
             try:
-                # algorithm_handler 내에 기존 등록 여부를 체크하는 함수나 목록 조회 함수가 있을 경우 활용
                 existing_speakers = []
                 if hasattr(ah, "get_registered_speakers"):
                     existing_speakers = ah.get_registered_speakers()
@@ -467,10 +578,9 @@ def run_data_refinement_webui():
                     existing_speakers = ah.list_speakers()
                 
                 if existing_speakers and speaker_name in existing_speakers:
-                    print(f"[안내] '{speaker_name}' 화자는 이미 등록되어 있습니다. 기존 알고리즘 업데이트/덮어쓰기를 진행합니다.")
+                    log_info(MODULE_NAME, f"'{speaker_name}' 화자는 이미 등록되어 있습니다. 기존 알고리즘 업데이트/덮어쓰기를 진행합니다.")
             except Exception as check_err:
-                # 혹시 모를 모듈 함수 부재 시 오류 없이 통과하도록 예외 처리
-                print(f"[참고] 기존 화자 목록 확인 중 예외(무시됨): {check_err}")
+                log_error(MODULE_NAME, "기존 화자 목록 확인 중 예외 발생 (무시됨)", check_err)
 
             new_items, _, _, save_msg, _, _ = save_all_changes(items, history, redo, page_num, *current_texts)
             if "[오류]" in save_msg: return f"등록 실패: {save_msg}"
@@ -482,6 +592,7 @@ def run_data_refinement_webui():
                 if success: return f"[🎉 성공] '{speaker_name}' 화자의 알고리즘 등록 및 텍스트 치환 사전 학습 완료!"
                 return f"[오류] 알고리즘 등록 처리 중 문제가 발생했습니다."
             except Exception as e:
+                log_error(MODULE_NAME, f"화자 알고리즘 등록 처리 중 예외 발생 ({speaker_name})", e)
                 return f"[오류] 예외 발생: {e}"
 
         register_algo_inputs = [speaker_name_input, state_items, state_history, state_redo, state_page] + text_components
@@ -489,9 +600,9 @@ def run_data_refinement_webui():
 
     demo.launch(inbrowser=True, server_name="127.0.0.1", server_port=None, prevent_thread_lock=True)
     
-    input("[*] Web UI가 실행되었습니다. Web UI 종료 버튼을 눌러 창을 닫은 후 엔터키를 누르면 메인 메뉴로 돌아갑니다...\n")
+    input("[*] Web UI가 실행되었습니다. Web UI 종료 버튼 클릭 시 엔터키로 메뉴이동\n")
     try:
         demo.close()
-    except:
-        pass
-    print("[*] 메인 메뉴로 복귀합니다.")
+    except Exception as e:
+        log_error(MODULE_NAME, "Gradio 데모 종료 중 예외 발생", e)
+    log_info(MODULE_NAME, "메인 메뉴로 복귀합니다.")

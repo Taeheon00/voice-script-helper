@@ -1,0 +1,11 @@
+{
+    "max_batch_size": 4,
+    "chunk_length_s": 30,
+    "gpu_memory_utilization": 0.85,
+    "enable_gpu_cache_clear": true,
+    "max_diarization_chunk_size_s": 600,
+    "max_chunk_duration_sec": 30.0,
+    "chunk_batch_size": 4,
+    "uvr5_segment_size": 1048576,
+    "torch_threads": 4
+}
