@@ -68,7 +68,7 @@ def record_and_transcribe(model=None):
         print("                녹화 방식 선택")
         print("============================================== ")
         print(" 1. 실시간 녹화 ")
-        print(" 2. 시간 선택 자동 녹화 (5분 단위 분할 저장) ")
+        print(" 2. 시간 선택 자동 녹화")
         print(" 3. 메뉴로 돌아가기 ")
         print("----------------------------------------------")
         
@@ -124,11 +124,11 @@ def record_and_transcribe(model=None):
     
     sys.stdin.flush()
     if rec_mode == "1":
-        input("👉 소리가 나는 상태에서 엔터(Enter) 키를 누르면 녹화가 시작됩니다...")
-        print(f"\n[🔴 브라우저 녹화 중...] (끝내려면 Enter)")
+        input("👉 소리가 나는 상태에서 엔터(Enter) 키를 누르면 녹화가 시작됩니다")
+        print(f"\n[🔴 브라우저 녹화 중] (끝내려면 Enter)")
     else:
-        input(f"👉 엔터를 누르면 [{min_input}분] 동안 자동 녹화가 시작됩니다. (중간에 Enter를 누르면 언제든 조기 종료 가능)")
-        print(f"\n[🔴 브라우저 자동 녹화 중...] (목표 시간: {min_input}분)")
+        input(f"👉 엔터를 누르면 [{min_input}분] 동안 자동 녹화가 시작됩니다. (끝내려면 Enter)")
+        print(f"\n[🔴 브라우저 자동 녹화 중] (목표 시간: {min_input}분)")
 
     stop_event = threading.Event()
     threading.Thread(target=lambda: (sys.stdin.read(1) if sys.stdin.readable() else input(), stop_event.set()), daemon=True).start()
@@ -160,7 +160,7 @@ def record_and_transcribe(model=None):
 
                 if rec_mode == "2" and segment_elapsed >= segment_duration:
                     capture.stop()
-                    print(f"\n[+] 5분 경과: 세그먼트 파일 저장 완료 -> {rec_file.resolve()}")
+                    print(f"\n[+] 5분 경과: audio 파일 저장 완료 -> {rec_file.resolve()}")
                     
                     file_counter += 1
                     rec_file = current_auto_session_dir / f"audio_{file_counter:03d}.wav"
@@ -168,7 +168,7 @@ def record_and_transcribe(model=None):
                     capture = ProcessAudioCapture(pid=target_pid, output_path=str(rec_file), level_callback=on_level_callback)
                     capture.start()
                     segment_start_time = time.time()
-                    print(f"[🔴 다음 세그먼트 녹화 중...] (새 파일: {rec_file.name})")
+                    print(f"[🔴 다음 audio 분할 녹화 중] (새 파일: {rec_file.name})")
 
                 db = current_db[0]
                 normalized_val = min(max((db + 60.0) / 60.0, 0.0), 1.0) if db > -59.0 else 0.0

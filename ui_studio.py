@@ -1,6 +1,9 @@
 import os
 import re
 import numpy as np
+import os
+import re
+import numpy as np
 import gradio as gr
 import algorithm_handler as ah
 from error_logger import log_error, log_info
@@ -57,17 +60,13 @@ def check_custom_single_format(filename_or_foldername):
     parts = cleaned.split("_")
     
     # 1. 표준 구조 패턴 검사: seg_sub_{번호}_{화자위치}_{이름}_{시간}
-    # 예: seg_sub_000_a_홍길동_170.0s-174.5s -> 총 6개 이상의 파트로 구성
     if len(parts) >= 5 and parts[0] == "seg" and parts[1] == "sub":
-        # 세그먼트 번호 파트(parts[2])는 가변 숫자임.
-        # 정확히 세 번째 인덱스(parts[3]) 위치에 'a'가 단독으로 오거나 커스텀 화자 규격일 때 단일 화자로 판정
         speaker_slot = parts[3]
         if speaker_slot == "a":
-            # 화자 번호나 이름 파트 추출 (존재한다면 다음 파트 활용 가능)
             speaker_num = "1"
             return True, speaker_num
             
-    # 2. 폴더명이 직접 커스텀 규격인 경우 대비 구조 체크 (예: a_폴더명 등)
+    # 2. 폴더명이 직접 커스텀 규격인 경우 대비 구조 체크
     if len(parts) > 0 and parts[0] == "a":
         return True, "1"
         
@@ -102,7 +101,6 @@ def inspect_all_files(target_dir):
             # 2. 공통 구조 판정 함수를 통해 정확한 위치의 'A' 및 생성 규칙 검증
             is_custom_single, _ = check_custom_single_format(lower_wf)
             
-            # 기존 정규식 패턴 (다중 화자 등 표준 패턴)
             pattern = r"^seg_sub_\d+_(speaker_\d+|화자_\d+)_\d+(?:\.\d+)?s-\d+(?:\.\d+)?s\.wav$"
             is_match_pattern = bool(re.match(pattern, lower_wf))
             
@@ -112,7 +110,6 @@ def inspect_all_files(target_dir):
         if issues:
             return False, f"전체 검사 실패 (총 {len(issues)}개 문제 발견):\n" + "\n".join(issues[:3])
         
-        # 통과 시 문구를 출력하지 않도록 빈 문자열 반환
         return True, ""
     except Exception as e:
         log_error(MODULE_NAME, "전체 파일 검사 중 예외 발생", e)
@@ -219,7 +216,6 @@ def run_data_refinement_webui():
             
             target_dir = os.path.join(SEGMENTS_BASE_DIR, folder_name)
             
-            # 전체 파일 검사 기능 실행 연동
             is_valid, inspect_msg = inspect_all_files(target_dir)
             if not is_valid:
                 log_error(MODULE_NAME, f"전체 파일 검사 경고: {inspect_msg}", None)
@@ -252,7 +248,6 @@ def run_data_refinement_webui():
                         t_content = ""
                 
                 lower_wf = w_f.lower()
-                
                 pattern = r"^seg_sub_\d+_(speaker_\d+|화자_\d+)_\d+(?:\.\d+)?s-\d+(?:\.\d+)?s\.wav$"
                 match = re.match(pattern, lower_wf)
                 
@@ -292,7 +287,6 @@ def run_data_refinement_webui():
             
             total_pages = int(np.ceil(len(items) / ITEMS_PER_PAGE))
             
-            # 검사 통과 시 문구를 제외하고 로드 완료 메시지만 깔끔하게 출력
             if inspect_msg:
                 status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지). [{inspect_msg}]"
             else:

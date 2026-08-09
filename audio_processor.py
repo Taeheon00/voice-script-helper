@@ -20,7 +20,7 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 from qwen_asr import Qwen3ASRModel
 import algorithm_handler as ah
 
-# ASR 후처리 및 정제 모듈 연동
+# ASR 후처리 및 정제 모듈 연동 (통합 함수만 호출하도록 캡슐화)
 import asr_postprocessor as post_processor
 
 # 표준 공통 에러 로거 연동
@@ -203,73 +203,6 @@ def apply_uvr5_vocal_extraction(input_audio_path):
         log_error(MODULE_NAME, f"UVR5 보컬 분리 프로세스 중 예외 발생 ({base_name})", e)
         raise
 
-def split_speaker_turn_by_silence(
-    vocal_audio_data,
-    start,
-    end,
-    sample_rate=TARGET_SAMPLE_RATE,
-    silence_threshold=0.05,
-    min_silence_duration=0.1
-):
-    start_sample = max(0, int(start * sample_rate))
-    end_sample = min(len(vocal_audio_data), int(end * sample_rate))
-
-    if end_sample <= start_sample:
-        return []
-
-    chunk = vocal_audio_data[start_sample:end_sample]
-    if chunk.size == 0:
-        return []
-
-    amplitude = np.abs(chunk)
-    silent_mask = amplitude < silence_threshold
-    min_silence_samples = max(1, int(min_silence_duration * sample_rate))
-
-    split_points = []
-    silence_start = None
-
-    for i, is_silent in enumerate(silent_mask):
-        if is_silent:
-            if silence_start is None:
-                silence_start = i
-        else:
-            if silence_start is not None:
-                silence_length = i - silence_start
-                if silence_length >= min_silence_samples:
-                    split_points.append((silence_start, i))
-                silence_start = None
-
-    if silence_start is not None:
-        silence_length = len(silent_mask) - silence_start
-        if silence_length >= min_silence_samples:
-            split_points.append((silence_start, len(silent_mask)))
-
-    if not split_points:
-        return [(start, end)]
-
-    result = []
-    current_start_sample = 0
-
-    for silence_start_sample, silence_end_sample in split_points:
-        segment_start_sample = current_start_sample
-        segment_end_sample = silence_start_sample
-
-        if segment_end_sample > segment_start_sample:
-            segment_start = start + segment_start_sample / sample_rate
-            segment_end = start + segment_end_sample / sample_rate
-            if segment_end > segment_start:
-                result.append((segment_start, segment_end))
-
-        current_start_sample = silence_end_sample
-
-    if current_start_sample < len(chunk):
-        segment_start = start + current_start_sample / sample_rate
-        segment_end = end
-        if segment_end > segment_start:
-            result.append((segment_start, segment_end))
-
-    return result
-
 def configure_strict_analysis_pipeline(audio_data, sample_rate):
     while True:
         print("\n==============================================")
@@ -336,74 +269,10 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         vocal_audio_data = vocal_audio_data.astype(np.float32)
         vocal_audio_data = resample_audio(vocal_audio_data, sr, TARGET_SAMPLE_RATE)
 
-        # -----------------------------------------------------------------
-        # 전체 음원 1차 ASR 검수 분석 + 동적 게이지바 적용 구간 복구
-        # -----------------------------------------------------------------
-        log_info(MODULE_NAME, "전체 음원 1차 ASR 검수 분석 수행 중...")
-        
-        chunk_duration = 30.0
-        chunk_samples = int(chunk_duration * TARGET_SAMPLE_RATE)
-        total_chunks = max(1, int(np.ceil(vocal_audio_data.shape[0] / chunk_samples)))
-        global_texts = []
-        global_start_time = time.time()
-
-        for idx in range(total_chunks):
-            start_sample = idx * chunk_samples
-            end_sample = min(vocal_audio_data.shape[0], (idx + 1) * chunk_samples)
-            chunk_audio = vocal_audio_data[start_sample:end_sample]
-            if chunk_audio.size == 0:
-                continue
-                
-            current_chunk_num = idx + 1
-            percent = int((current_chunk_num / total_chunks) * 100)
-            elapsed = time.time() - global_start_time
-            avg_time = elapsed / current_chunk_num if current_chunk_num > 0 else 0
-            remaining_sec = avg_time * (total_chunks - current_chunk_num)
-
-            eta_str = format_time(remaining_sec)
-            elapsed_str = format_time(elapsed)
-
-            terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-            prefix = f"{percent:3d}% |"
-            suffix = f"| {current_chunk_num}/{total_chunks} {elapsed_str}<{eta_str}"
-            fixed_width = len(prefix) + len(suffix)
-            bar_len = max(1, terminal_width - fixed_width - 5)
-            filled_len = int(bar_len * current_chunk_num / total_chunks)
-            empty_len = bar_len - filled_len
-            bar_str = "█" * filled_len + " " * empty_len
-
-            progress_msg = prefix + bar_str + suffix
-            sys.stdout.write("\r" + progress_msg)
-            sys.stdout.flush()
-
-            try:
-                from transformers import logging as hf_logging
-                hf_logging.set_verbosity_error()
-                
-                with torch.no_grad():
-                    res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
-                
-                chunk_text = ""
-                if hasattr(res_chunk, "text"):
-                    chunk_text = res_chunk.text
-                elif isinstance(res_chunk, list):
-                    chunk_text = " ".join([str(item.get("text", item)) if isinstance(item, dict) else str(getattr(item, "text", item)) for item in res_chunk])
-                else:
-                    chunk_text = str(res_chunk)
-                    
-                if chunk_text.strip():
-                    global_texts.append(chunk_text.strip())
-            except Exception:
-                pass
-                
-            if torch.cuda.is_available() and CONFIG.get("enable_gpu_cache_clear", True):
-                torch.cuda.empty_cache()
-
-        print() # 게이지바 줄바꿈
-        global_inspected_text = " ".join(global_texts)
-        if global_inspected_text:
-            log_info(MODULE_NAME, f"전체 음원 1차 검수 완료 (글자 수: {len(global_inspected_text)})")
-        # -----------------------------------------------------------------
+        vocal_audio_data = vocal_audio_data.astype(np.float32)
+        max_val = np.max(np.abs(vocal_audio_data))
+        if max_val > 0.0001:
+            vocal_audio_data = vocal_audio_data / max_val
 
         raw_source_stem = Path(file_path).stem
         clean_source_name = re.sub(r'_Vocals$', '', raw_source_stem, flags=re.IGNORECASE)
@@ -459,19 +328,8 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                         sys.stdout.write("\r" + progress_msg)
                         sys.stdout.flush()
 
-                        split_turns = split_speaker_turn_by_silence(
-                            vocal_audio_data,
-                            turn.start,
-                            turn.end,
-                            sample_rate=TARGET_SAMPLE_RATE,
-                            silence_threshold=0.015,
-                            min_silence_duration=0.22
-                        )
-
-                        if len(split_turns) > 1:
-                            for split_start, split_end in split_turns:
-                                raw_speaker_turns.append((split_start, split_end, speaker))
-                        else:
+                        duration = turn.end - turn.start
+                        if duration >= 1.0:
                             raw_speaker_turns.append((turn.start, turn.end, speaker))
                         
                     print()
@@ -501,10 +359,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         total_turns = len(raw_speaker_turns)
         
         for idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns, 1):
-            segment_duration = end - start
-            if segment_duration < 0.3:
-                continue
-
             percent = int((idx / total_turns) * 100)
             elapsed = time.time() - asr_start_time
             avg_time = elapsed / idx if idx > 0 else 0
@@ -549,18 +403,16 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 except Exception as e:
                     log_error(MODULE_NAME, f"구간 {idx} ASR 변환 실패 ({start:.1f}s ~ {end:.1f}s)", e)
 
-            chunk_txt = post_processor.clean_hallucination_text(chunk_text)
-            chunk_txt = post_processor.sanitize_asr_output(
-                chunk_txt,
+            # [수정 완료] 후처리 모듈의 통합 함수 하나만 호출하여 내부 세부 함수 의존성을 완전히 제거
+            chunk_txt = post_processor.process_segment_text(
+                chunk_text,
                 recent_texts=recent_texts,
-                current_start=start
+                current_start=start,
+                mapped_speaker=mapped_speaker
             )
+
             if not chunk_txt.strip():
                 continue
-
-            chunk_txt = post_processor.clean_and_convert_numbers(chunk_txt)
-            chunk_txt = post_processor.convert_korean_numbers(chunk_txt)
-            chunk_txt = ah.apply_text_corrections(chunk_txt, mapped_speaker)
             
             temp_segments.append({
                 "start": start,
@@ -602,13 +454,13 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         ASR_DIR.mkdir(exist_ok=True)
         
         post_file_path = POST_DIR / f"{clean_source_name}_post_{len(list(POST_DIR.glob(f'{clean_source_name}_post_*.txt'))) + 1:03d}.txt"
-        all_full_texts = []
-        saved_segment_count = 0
+        asr_file_path = ASR_DIR / f"{clean_source_name}_asr_{len(list(ASR_DIR.glob(f'{clean_source_name}_asr_*.txt'))) + 1:03d}.txt"
 
+        saved_segment_count = 0
         post_proc_start_time = time.time()
         total_segments = len(merged_segments)
 
-        with open(post_file_path, "w", encoding="utf-8") as post_file_obj:
+        with open(post_file_path, "w", encoding="utf-8") as post_file_obj, open(asr_file_path, "w", encoding="utf-8") as asr_file_obj:
             post_file_obj.write(f"=== 대화 로그 ({file_path}) ===\n\n")
 
             for idx, seg in enumerate(merged_segments, 1):
@@ -643,19 +495,14 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 else:
                     base_seg_name = f"seg_sub_{saved_segment_count-1:03d}_B_{safe_speaker_name}_{seg['start']:.1f}s-{seg['end']:.1f}s"
 
-                # WAV 파일 및 순수 텍스트 세그먼트 파일 정상 저장
                 save_wav_chunk(seg["audio"], TARGET_SAMPLE_RATE, specific_segment_dir / f"{base_seg_name}.wav")
                 (specific_segment_dir / f"{base_seg_name}.txt").write_text(seg['text'], encoding="utf-8")
 
                 log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
                 post_file_obj.write(log_line + "\n")
-                all_full_texts.append(log_line)
+                asr_file_obj.write(log_line + "\n")
 
         print()
-
-        asr_raw_file = ASR_DIR / f"{clean_source_name}_asr_{len(list(ASR_DIR.glob(f'{clean_source_name}_asr_*.txt'))) + 1:03d}.txt"
-        asr_raw_file.write_text("\n".join(all_full_texts), encoding="utf-8")
-
         log_info(MODULE_NAME, f"분석 완료! 유효 세그먼트: {saved_segment_count}개")
 
     except Exception as e:
@@ -691,7 +538,7 @@ def select_and_process_audio_file(model=None):
 
     while True:
         try:
-            root_wavs = sorted([f for f in AUDIO_DIR.glob("*.wav") if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower()], key=lambda x: x.stat().st_mtime, reverse=True)
+            root_wavs = sorted([f for f in AUDIO_DIR.glob("*.wav") if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower()], key=lambda x: x.name)
         except Exception as e:
             log_error(MODULE_NAME, "audio 폴더 내 WAV 파일 검색 실패", e)
             root_wavs = []
@@ -728,7 +575,7 @@ def select_and_process_audio_file(model=None):
         if item_type == 'auto':
             while True:
                 try:
-                    auto_subdirs = sorted([d for d in AUTO_REC_DIR.iterdir() if d.is_dir() and d.name.lower() != "uvr5"], key=lambda x: x.stat().st_mtime, reverse=True) if AUTO_REC_DIR.exists() else []
+                    auto_subdirs = sorted([d for d in AUTO_REC_DIR.iterdir() if d.is_dir() and d.name.lower() != "uvr5"], key=lambda x: x.name) if AUTO_REC_DIR.exists() else []
                 except Exception as e:
                     log_error(MODULE_NAME, "자동녹화 하위 폴더 검색 실패", e)
                     auto_subdirs = []
@@ -765,7 +612,7 @@ def select_and_process_audio_file(model=None):
                     
                 target_folder = sub_menu_items[sub_adjusted_idx][1]
                 try:
-                    sub_wavs = sorted(list(target_folder.glob("*.wav")))
+                    sub_wavs = sorted(list(target_folder.glob("*.wav")), key=lambda x: x.name)
                 except Exception as e:
                     log_error(MODULE_NAME, f"폴더 내 WAV 검색 실패 ({target_folder.name})", e)
                     sub_wavs = []
