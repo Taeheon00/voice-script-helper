@@ -41,13 +41,13 @@ def normalize_korean_numbers_strict(text):
             val = int(kor_to_num_map.get(kor_num, kor_num))
         return f"{val}월"
 
-    text = re.sub(r'\b([일이삼사오육칠팔구십]+)\s*월\b', replace_month, text)
+    text = re.sub(r'([일이삼사오육칠팔구십]+)\s*월', replace_month, text)
 
     # 2. 날짜('일') 및 화폐('원') 등 명확한 단위가 결합된 수사 변환
     def replace_day_or_unit(match):
         full_match_str = match.group(0)
-        kor_part = match.group(1)   # 수사 부분 (예: 이십일, 육 등)
-        suffix = match.group(2)     # 단위 및 조사 (일부터, 까지, 일, 원 등)
+        kor_part = match.group(1)   
+        suffix = match.group(2)     
         
         try:
             val = 0
@@ -66,7 +66,7 @@ def normalize_korean_numbers_strict(text):
         except Exception:
             return full_match_str
 
-    pattern_unit = r'\b([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원)\b'
+    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
     # 3. '1조 5천억' 같은 대규모 단위 혼합 변환 (조, 억, 만 단위 포함 패턴)
@@ -163,8 +163,8 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
 def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
     """
     [정석적인 고도화 스트림 처리 루프]
-    - 미세 노이즈로 인해 문장이 뭉개지거나 잘리는 현상을 막기 위해 
-      VAD 묵음 지속 기준을 타이트하게(300ms) 조정하여 독립된 구간으로 정밀 분할합니다.
+    - 발화 사이의 미세 잔향이나 늘어지는 여운을 VAD가 명확히 묵음으로 처리할 수 있도록 
+      threshold 및 묵음 지속 기준을 정밀 튜닝합니다.
     """
     if model is None or vocal_audio_data is None or vocal_audio_data.size == 0:
         return ""
@@ -176,15 +176,14 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
         
         with torch.no_grad():
             try:
-                # [개선 포인트] min_silence_duration_ms를 500ms -> 300ms로 낮추어 
-                # 짧은 공백(묵음)도 놓치지 않고 세그먼트를 칼같이 분리하도록 유도
                 res_segments, info = model.transcribe(
                     (vocal_audio_data, target_sample_rate), 
                     language="ko", 
                     vad_filter=True, 
                     vad_parameters=dict(
-                        min_silence_duration_ms=300,  # 0.3초 이상의 묵음도 독립 구간으로 인식
-                        speech_pad_ms=200             # 음성 앞뒤 여유 패딩 구간 축소로 뭉침 방지
+                        threshold=0.35,               # 음성 판정 민감도를 조정하여 미세 잔향을 묵음으로 유도
+                        min_silence_duration_ms=250,  # 0.25초 이상의 공백을 묵음으로 확실히 캐치
+                        speech_pad_ms=100             # 패딩을 최적화하여 앞뒤 음성 뭉침 방지
                     ),
                     without_timestamps=False
                 )
