@@ -23,7 +23,7 @@ import algorithm_handler as ah
 # ASR 후처리 및 정제 모듈 연동 (통합 함수만 호출하도록 캡슐화)
 import asr_postprocessor as post_processor
 
-# 표준 공통 에러 로거 연동
+# 표준 공통 에러 로ガー 연동
 from error_logger import log_error, log_info
 
 MODULE_NAME = "AudioProcessor"
@@ -42,7 +42,7 @@ except ImportError as e:
     HAS_PYANNOTE = False
     log_error(MODULE_NAME, "pyannote.audio 패키지 로드 실패 (화자 분리 기능을 사용할 수 없습니다)", e)
 
-# 디렉토리 구조 설정 (불필요한 공통 AUTO_UVR5_DIR 제거)
+# 디렉토리 구조 설정
 AUDIO_DIR = Path("audio")
 AUTO_REC_DIR = AUDIO_DIR / "auto_recorded_audio"
 MANUAL_UVR5_DIR = AUDIO_DIR / "uvr5"
@@ -74,7 +74,6 @@ def load_config():
 CONFIG = load_config()
 
 def ensure_directories():
-    # AUTO_UVR5_DIR은 각 세션별로 동적 생성되므로 공통 생성 목록에서 제외
     for d in [
         AUDIO_DIR,
         MANUAL_UVR5_DIR,
@@ -185,7 +184,6 @@ def apply_uvr5_vocal_extraction(input_audio_path):
     ensure_directories()
     abs_input_path = Path(input_audio_path).resolve()
     
-    # [핵심] 각 자동녹화 세션 폴더 하위에 독립적인 uvr5 폴더 지정 (예: auto_recorded_audio/자동녹화001/uvr5/)
     if AUTO_REC_DIR.resolve() in abs_input_path.parents:
         target_uvr5_dir = abs_input_path.parent / "uvr5"
     else:
@@ -298,58 +296,19 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
             print("[오류] 올바른 번호를 입력해주세요.")
             log_info(MODULE_NAME, f"잘못된 분석 모드 번호 입력됨: {mode}")
 
-def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis_mode=0):
-    log_info(MODULE_NAME, f"분석 실행: {Path(file_path).name}")
+def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, analysis_mode=0, target_folder_name=""):
+    """
+    자동녹화 폴더 내의 모든 5분 분할 파일들을 순차적으로 처리하되,
+    모든 세그먼트와 결과 텍스트가 하나의 공통 폴더 및 최종 파일에 누적되도록 통합 처리합니다.
+    """
+    log_info(MODULE_NAME, f"통합 일괄 분석 실행: {target_folder_name} (총 {len(sub_wavs)}개 파일)")
     try:
         if model is None:
             log_error(MODULE_NAME, "분석 실행 실패: 모델이 로드되어 있지 않습니다.", ValueError("Model is None"))
             return
 
-        try:
-            audio_data, sr = sf.read(str(file_path))
-        except Exception as e:
-            log_error(MODULE_NAME, f"원본 오디오 파일 읽기 실패 ({file_path})", e)
-            return
-
-        if audio_data.ndim > 1:
-            audio_data = np.mean(audio_data, axis=1)
-        audio_data = audio_data.astype(np.float32)
-        audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
-        
-        max_val = np.max(np.abs(audio_data))
-        if max_val > 1e-5:
-            audio_data = audio_data / max_val
-        else:
-            log_info(MODULE_NAME, f"원본 오디오 신호 크기가 너무 작습니다 (Max: {max_val})")
-
-        try:
-            processed_vocal_path = apply_uvr5_vocal_extraction(file_path)
-        except Exception as e:
-            log_error(MODULE_NAME, f"UVR5 보컬 추출 파이프라인 연동 실패 ({file_path})", e)
-            return
-        
-        try:
-            vocal_audio_data, sr = sf.read(str(processed_vocal_path))
-        except Exception as e:
-            log_error(MODULE_NAME, f"추출된 보컬 파일 읽기 실패 ({processed_vocal_path})", e)
-            return
-
-        if vocal_audio_data.ndim > 1:
-            vocal_audio_data = np.mean(vocal_audio_data, axis=1)
-        vocal_audio_data = vocal_audio_data.astype(np.float32)
-        vocal_audio_data = resample_audio(vocal_audio_data, sr, TARGET_SAMPLE_RATE)
-
-        vocal_audio_data = vocal_audio_data.astype(np.float32)
-        max_val = np.max(np.abs(vocal_audio_data))
-        if max_val > 0.0001:
-            vocal_audio_data = vocal_audio_data / max_val
-        else:
-            log_info(MODULE_NAME, f"보컬 오디오 신호 크기가 너무 작습니다 (Max: {max_val})")
-
-        raw_source_stem = Path(file_path).stem
-        clean_source_name = re.sub(r'_Vocals$', '', raw_source_stem, flags=re.IGNORECASE)
-        
-        parent_audio_dir = SEGMENTS_BASE_DIR / clean_source_name
+        # 결과물이 저장될 단일 세그먼트 디렉토리 생성 (예: segments_base/자동녹화폴더명/seg_sub_001)
+        parent_audio_dir = SEGMENTS_BASE_DIR / target_folder_name
         try:
             parent_audio_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -359,7 +318,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         try:
             existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
         except Exception as e:
-            log_info(MODULE_NAME, f"세그먼트 하위 디렉토리 검색 실패 ({parent_audio_dir})")
             existing_subdirs = []
             
         specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
@@ -368,173 +326,148 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         except Exception as e:
             log_error(MODULE_NAME, f"특정 세그먼트 디렉토리 생성 실패 ({specific_segment_dir})", e)
 
-        log_info(MODULE_NAME, "화자 분리 수행 중...")
-        diar_start_time = time.time()
-        total_duration = vocal_audio_data.shape[0] / TARGET_SAMPLE_RATE
-        raw_speaker_turns = []
-        
-        if HAS_PYANNOTE and not is_single:
-            token = get_huggingface_token()
-            if token:
-                try:
-                    if CONFIG.get("enable_gpu_cache_clear", True):
-                        torch.cuda.empty_cache()
+        all_merged_segments = []
+        global_time_offset = 0.0
 
-                    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
-                    pipeline.to(torch.device(DEVICE))
-                    tensor_audio = torch.from_numpy(vocal_audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
-                    diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE})
-                    annotation = getattr(diarization, "speaker_diarization", diarization)
-                    
-                    tracks = list(annotation.itertracks(yield_label=True))
-                    total_tracks = len(tracks)
-
-                    for idx, (turn, _, speaker) in enumerate(tracks, 1):
-                        percent = int((idx / total_tracks) * 100) if total_tracks > 0 else 100
-                        elapsed = time.time() - diar_start_time
-                        avg_time = elapsed / idx if idx > 0 else 0
-                        remaining_sec = avg_time * (total_tracks - idx)
-
-                        eta_str = format_time(remaining_sec)
-                        elapsed_str = format_time(elapsed)
-
-                        terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-                        prefix = f"{percent:3d}% |"
-                        suffix = f"| {idx}/{total_tracks} {elapsed_str}<{eta_str}"
-                        fixed_width = len(prefix) + len(suffix)
-                        bar_len = max(1, terminal_width - fixed_width - 5)
-                        filled_len = int(bar_len * idx / total_tracks) if total_tracks > 0 else bar_len
-                        empty_len = bar_len - filled_len
-                        bar_str = "█" * filled_len + " " * empty_len
-
-                        progress_msg = prefix + bar_str + suffix
-                        try:
-                            sys.stdout.write("\r" + progress_msg)
-                            sys.stdout.flush()
-                        except Exception as ex:
-                            pass
-
-                        duration = turn.end - turn.start
-                        if duration >= 1.0:
-                            raw_speaker_turns.append((turn.start, turn.end, speaker))
-                        else:
-                            pass
-                    
-                    print()
-                    log_info(MODULE_NAME, f"화자 분리 완료 (소요 시간: {format_time(time.time() - diar_start_time)})")
-
-                except Exception as ex:
-                    log_error(MODULE_NAME, "화자 분리 수행 중 예외 발생", ex)
-            else:
-                log_info(MODULE_NAME, "화자 분리 토큰이 없어 PyAnnote 파이프라인을 건너뜁니다.")
-        else:
-            if not HAS_PYANNOTE:
-                log_info(MODULE_NAME, "pyannote 패키지가 없어 화자 분리 단계를 건너뜁니다.")
-            elif is_single:
-                log_info(MODULE_NAME, "단일 화자 모드이므로 화자 분리 단계를 건너뜁니다.")
-        
-        if not raw_speaker_turns:
-            log_info(MODULE_NAME, "화자 분리 결과 구간이 없어 전체 통으로 기본 세그먼트를 할당합니다.")
-            raw_speaker_turns.append((0.0, total_duration, "SPEAKER_00"))
-
-        speaker_mapping = {}
-        unique_orig_speakers = sorted({s for _, _, s in raw_speaker_turns})
-        for idx, orig_s in enumerate(unique_orig_speakers):
-            if active_speakers and len(active_speakers) > 1:
-                speaker_mapping[orig_s] = active_speakers[idx] if idx < len(active_speakers) else orig_s
-            elif active_speakers and len(active_speakers) == 1:
-                speaker_mapping[orig_s] = active_speakers[0]
-            else:
-                speaker_mapping[orig_s] = orig_s
-
-        log_info(MODULE_NAME, f"구간별 ASR 인식 및 문장 정제 시작 (총 {len(raw_speaker_turns)}개 구간)")
-        asr_start_time = time.time()
-        
-        temp_segments = []
-        recent_texts = [] 
-        total_turns = len(raw_speaker_turns)
-        
-        for idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns, 1):
-            percent = int((idx / total_turns) * 100)
-            elapsed = time.time() - asr_start_time
-            avg_time = elapsed / idx if idx > 0 else 0
-            remaining_sec = avg_time * (total_turns - idx)
-
-            eta_str = format_time(remaining_sec)
-            elapsed_str = format_time(elapsed)
-
-            terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-            prefix = f"{percent:3d}% |"
-            suffix = f"| {idx}/{total_turns} {elapsed_str}<{eta_str}"
-            fixed_width = len(prefix) + len(suffix)
-            bar_len = max(1, terminal_width - fixed_width - 5)
-            filled_len = int(bar_len * idx / total_turns)
-            empty_len = bar_len - filled_len
-            bar_str = "█" * filled_len + " " * empty_len
-
-            progress_msg = prefix + bar_str + suffix
-            try:
-                sys.stdout.write("\r" + progress_msg)
-                sys.stdout.flush()
-            except Exception as ex:
-                pass
-
-            mapped_speaker = speaker_mapping.get(orig_speaker, "SPEAKER_00")
-            start_sample = int(start * TARGET_SAMPLE_RATE)
-            end_sample = int(end * TARGET_SAMPLE_RATE)
-            chunk_audio = vocal_audio_data[start_sample:end_sample]
-            
-            chunk_text = ""
-            if chunk_audio.size > 0:
-                try:
-                    from transformers import logging as hf_logging
-                    hf_logging.set_verbosity_error()
-                    
-                    with torch.no_grad():
-                        res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
-                    
-                    if hasattr(res_chunk, "text"):
-                        chunk_text = res_chunk.text
-                    elif isinstance(res_chunk, list):
-                        chunk_text = " ".join([str(item.get("text", item)) if isinstance(item, dict) else str(getattr(item, "text", item)) for item in res_chunk])
-                    else:
-                        chunk_text = str(res_chunk)
-                except Exception as e:
-                    log_error(MODULE_NAME, f"구간 {idx} ASR 변환 실패 ({start:.1f}s ~ {end:.1f}s)", e)
-            else:
-                log_info(MODULE_NAME, f"구간 {idx} 오디오 데이터 크기가 0입니다 ({start:.1f}s ~ {end:.1f}s)")
+        # 각 분할 파일 순회
+        for file_idx, file_path in enumerate(sub_wavs, 1):
+            file_path_obj = Path(file_path)
+            log_info(MODULE_NAME, f"[{file_idx}/{len(sub_wavs)}] 파일 파이프라인 처리 중: {file_path_obj.name}")
+            print(f"\n[진행] 분할 파일 처리 ({file_idx}/{len(sub_wavs)}) -> {file_path_obj.name}")
 
             try:
-                chunk_txt = post_processor.process_segment_text(
-                    chunk_text,
-                    recent_texts=recent_texts,
-                    current_start=start,
-                    mapped_speaker=mapped_speaker
-                )
+                audio_data, sr = sf.read(str(file_path_obj))
             except Exception as e:
-                log_error(MODULE_NAME, f"세그먼트 텍스트 후처리 모듈 호출 중 예외 발생 (구간 {idx})", e)
-                chunk_txt = ""
+                log_error(MODULE_NAME, f"원본 오디오 파일 읽기 실패 ({file_path_obj.name})", e)
+                continue
 
-            if not chunk_txt.strip():
+            if audio_data.ndim > 1:
+                audio_data = np.mean(audio_data, axis=1)
+            audio_data = audio_data.astype(np.float32)
+            audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
+            
+            max_val = np.max(np.abs(audio_data))
+            if max_val > 1e-5:
+                audio_data = audio_data / max_val
+
+            try:
+                processed_vocal_path = apply_uvr5_vocal_extraction(file_path_obj)
+            except Exception as e:
+                log_error(MODULE_NAME, f"UVR5 보컬 추출 파이프라인 연동 실패 ({file_path_obj.name})", e)
                 continue
             
-            temp_segments.append({
-                "start": start,
-                "end": end,
-                "speaker": mapped_speaker,
-                "text": chunk_txt,
-                "audio": chunk_audio
-            })
-
-        print()
-
-        merged_segments = []
-        for seg in temp_segments:
-            if not merged_segments:
-                merged_segments.append(seg)
+            try:
+                vocal_audio_data, sr = sf.read(str(processed_vocal_path))
+            except Exception as e:
+                log_error(MODULE_NAME, f"추출된 보컬 파일 읽기 실패 ({processed_vocal_path})", e)
                 continue
 
-            prev = merged_segments[-1]
+            if vocal_audio_data.ndim > 1:
+                vocal_audio_data = np.mean(vocal_audio_data, axis=1)
+            vocal_audio_data = vocal_audio_data.astype(np.float32)
+            vocal_audio_data = resample_audio(vocal_audio_data, sr, TARGET_SAMPLE_RATE)
+
+            max_val = np.max(np.abs(vocal_audio_data))
+            if max_val > 0.0001:
+                vocal_audio_data = vocal_audio_data / max_val
+
+            file_duration = vocal_audio_data.shape[0] / TARGET_SAMPLE_RATE
+            raw_speaker_turns = []
+            
+            if HAS_PYANNOTE and not is_single:
+                token = get_huggingface_token()
+                if token:
+                    try:
+                        if CONFIG.get("enable_gpu_cache_clear", True):
+                            torch.cuda.empty_cache()
+
+                        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+                        pipeline.to(torch.device(DEVICE))
+                        tensor_audio = torch.from_numpy(vocal_audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
+                        diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE})
+                        annotation = getattr(diarization, "speaker_diarization", diarization)
+                        
+                        for turn, _, speaker in annotation.itertracks(yield_label=True):
+                            if (turn.end - turn.start) >= 1.0:
+                                raw_speaker_turns.append((turn.start + global_time_offset, turn.end + global_time_offset, speaker))
+                    except Exception as ex:
+                        log_error(MODULE_NAME, f"화자 분리 수행 중 예외 발생 ({file_path_obj.name})", ex)
+            
+            if not raw_speaker_turns:
+                raw_speaker_turns.append((global_time_offset, global_time_offset + file_duration, "SPEAKER_00"))
+
+            speaker_mapping = {}
+            unique_orig_speakers = sorted({s for _, _, s in raw_speaker_turns})
+            for idx_s, orig_s in enumerate(unique_orig_speakers):
+                if active_speakers and len(active_speakers) > 1:
+                    speaker_mapping[orig_s] = active_speakers[idx_s] if idx_s < len(active_speakers) else orig_s
+                elif active_speakers and len(active_speakers) == 1:
+                    speaker_mapping[orig_s] = active_speakers[0]
+                else:
+                    speaker_mapping[orig_s] = orig_s
+
+            recent_texts = [] 
+            total_turns = len(raw_speaker_turns)
+            
+            for turn_idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns, 1):
+                mapped_speaker = speaker_mapping.get(orig_speaker, "SPEAKER_00")
+                
+                # 로컬 세그먼트 오디오 추출을 위한 인덱스 계산
+                local_start = max(0.0, start - global_time_offset)
+                local_end = min(file_duration, end - global_time_offset)
+                start_sample = int(local_start * TARGET_SAMPLE_RATE)
+                end_sample = int(local_end * TARGET_SAMPLE_RATE)
+                chunk_audio = vocal_audio_data[start_sample:end_sample]
+                
+                chunk_text = ""
+                if chunk_audio.size > 0:
+                    try:
+                        from transformers import logging as hf_logging
+                        hf_logging.set_verbosity_error()
+                        
+                        with torch.no_grad():
+                            res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
+                        
+                        if hasattr(res_chunk, "text"):
+                            chunk_text = res_chunk.text
+                        elif isinstance(res_chunk, list):
+                            chunk_text = " ".join([str(item.get("text", item)) if isinstance(item, dict) else str(getattr(item, "text", item)) for item in res_chunk])
+                        else:
+                            chunk_text = str(res_chunk)
+                    except Exception as e:
+                        log_error(MODULE_NAME, f"구간 ASR 변환 실패 ({start:.1f}s ~ {end:.1f}s)", e)
+
+                try:
+                    chunk_txt = post_processor.process_segment_text(
+                        chunk_text,
+                        recent_texts=recent_texts,
+                        current_start=start,
+                        mapped_speaker=mapped_speaker
+                    )
+                except Exception as e:
+                    chunk_txt = chunk_text
+
+                if not chunk_txt.strip():
+                    continue
+                
+                all_merged_segments.append({
+                    "start": start,
+                    "end": end,
+                    "speaker": mapped_speaker,
+                    "text": chunk_txt,
+                    "audio": chunk_audio
+                })
+
+            global_time_offset += file_duration
+
+        # 최종 세그먼트 리스트 인접 화자/문맥 병합 처리
+        final_segments = []
+        for seg in all_merged_segments:
+            if not final_segments:
+                final_segments.append(seg)
+                continue
+
+            prev = final_segments[-1]
             time_gap = seg["start"] - prev["end"]
             prev_text_stripped = prev["text"].strip()
             
@@ -543,66 +476,43 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
             is_close_gap = (time_gap < 0.5)
 
             if is_same_speaker and is_sentence_incomplete and is_close_gap:
+                prev["end"] = seg["end"]
+                prev["text"] = f"{prev['text']} {seg['text']}".strip()
+                # 오디오 병합 처리
                 try:
-                    start_sample = int(prev["start"] * TARGET_SAMPLE_RATE)
-                    end_sample = int(seg["end"] * TARGET_SAMPLE_RATE)
-                    new_chunk_audio = vocal_audio_data[start_sample:end_sample]
-
-                    prev["end"] = seg["end"]
-                    prev["text"] = f"{prev['text']} {seg['text']}".strip()
-                    prev["audio"] = new_chunk_audio
-                except Exception as e:
-                    merged_segments.append(seg)
+                    combined_audio = np.concatenate([prev["audio"], seg["audio"]])
+                    prev["audio"] = combined_audio
+                except Exception:
+                    pass
             else:
-                merged_segments.append(seg)
+                final_segments.append(seg)
 
-        log_info(MODULE_NAME, f"최종 세그먼트 및 대화 로그 저장 시작 (총 {len(merged_segments)}개 세그먼트)")
+        log_info(MODULE_NAME, f"통합 최종 세그먼트 및 대화 로그 저장 시작 (총 {len(final_segments)}개 세그먼트)")
         try:
             POST_DIR.mkdir(exist_ok=True)
             ASR_DIR.mkdir(exist_ok=True)
         except Exception as e:
             log_error(MODULE_NAME, "출력 결과 디렉토리 생성 실패", e)
         
-        try:
-            post_file_path = POST_DIR / f"{clean_source_name}_post_{len(list(POST_DIR.glob(f'{clean_source_name}_post_*.txt'))) + 1:03d}.txt"
-            asr_file_path = ASR_DIR / f"{clean_source_name}_asr_{len(list(ASR_DIR.glob(f'{clean_source_name}_asr_*.txt'))) + 1:03d}.txt"
-        except Exception as e:
-            post_file_path = POST_DIR / f"{clean_source_name}_post_001.txt"
-            asr_file_path = ASR_DIR / f"{clean_source_name}_asr_001.txt"
+        post_file_path = POST_DIR / f"{target_folder_name}_post_001.txt"
+        asr_file_path = ASR_DIR / f"{target_folder_name}_asr_001.txt"
+        
+        # 파일 중복 시 번호 증가 처리
+        p_idx = 1
+        while post_file_path.exists():
+            post_file_path = POST_DIR / f"{target_folder_name}_post_{p_idx:03d}.txt"
+            p_idx += 1
+        a_idx = 1
+        while asr_file_path.exists():
+            asr_file_path = ASR_DIR / f"{target_folder_name}_asr_{a_idx:03d}.txt"
+            a_idx += 1
 
         saved_segment_count = 0
-        post_proc_start_time = time.time()
-        total_segments = len(merged_segments)
-
         try:
             with open(post_file_path, "w", encoding="utf-8") as post_file_obj, open(asr_file_path, "w", encoding="utf-8") as asr_file_obj:
-                post_file_obj.write(f"=== 대화 로그 ({file_path}) ===\n\n")
+                post_file_obj.write(f"=== 대화 로그 (자동녹화: {target_folder_name}) ===\n\n")
 
-                for idx, seg in enumerate(merged_segments, 1):
-                    percent = int((idx / total_segments) * 100) if total_segments > 0 else 100
-                    elapsed = time.time() - post_proc_start_time
-                    avg_time = elapsed / idx if idx > 0 else 0
-                    remaining_sec = avg_time * (total_segments - idx)
-
-                    eta_str = format_time(remaining_sec)
-                    elapsed_str = format_time(elapsed)
-
-                    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-                    prefix = f"{percent:3d}% |"
-                    suffix = f"| {idx}/{total_segments} {elapsed_str}<{eta_str}"
-                    fixed_width = len(prefix) + len(suffix)
-                    bar_len = max(1, terminal_width - fixed_width - 5)
-                    filled_len = int(bar_len * idx / total_segments) if total_segments > 0 else bar_len
-                    empty_len = bar_len - filled_len
-                    bar_str = "█" * filled_len + " " * empty_len
-
-                    progress_msg = prefix + bar_str + suffix
-                    try:
-                        sys.stdout.write("\r" + progress_msg)
-                        sys.stdout.flush()
-                    except Exception as ex:
-                        pass
-
+                for idx, seg in enumerate(final_segments, 1):
                     saved_segment_count += 1
                     safe_speaker_name = str(seg["speaker"]).replace("/", "_").replace("\\", "_")
                     
@@ -623,36 +533,99 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                     post_file_obj.write(log_line + "\n")
                     asr_file_obj.write(log_line + "\n")
 
-            print()
-            log_info(MODULE_NAME, f"분석 완료! 유효 세그먼트: {saved_segment_count}개")
+            log_info(MODULE_NAME, f"통합 분석 완료! 유효 세그먼트: {saved_segment_count}개")
+            print(f"\n[알림] 자동녹화 폴더 '{target_folder_name}'의 모든 분석이 하나의 폴더와 최종 파일로 통합 완료되었습니다!")
         except Exception as e:
-            log_error(MODULE_NAME, "결과 파일 저장 루프 중 치명적인 예외 발생", e)
+            log_error(MODULE_NAME, "결과 파일 저장 중 치명적인 예외 발생", e)
 
     except Exception as e:
-        log_error(MODULE_NAME, f"분석 실행 플로우 중 치명적인 예외 발생 ({file_path})", e)
+        log_error(MODULE_NAME, f"통합 분석 실행 플로우 중 치명적인 예외 발생 ({target_folder_name})", e)
+
+def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis_mode=0):
+    # 단일 파일 분석용 (기존 유지)
+    log_info(MODULE_NAME, f"분석 실행: {Path(file_path).name}")
+    try:
+        if model is None:
+            return
+
+        try:
+            audio_data, sr = sf.read(str(file_path))
+        except Exception as e:
+            return
+
+        if audio_data.ndim > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        audio_data = audio_data.astype(np.float32)
+        audio_data = resample_audio(audio_data, sr, TARGET_SAMPLE_RATE)
+        
+        processed_vocal_path = apply_uvr5_vocal_extraction(file_path)
+        vocal_audio_data, sr = sf.read(str(processed_vocal_path))
+
+        if vocal_audio_data.ndim > 1:
+            vocal_audio_data = np.mean(vocal_audio_data, axis=1)
+        vocal_audio_data = resample_audio(vocal_audio_data.astype(np.float32), sr, TARGET_SAMPLE_RATE)
+
+        raw_source_stem = Path(file_path).stem
+        clean_source_name = re.sub(r'_Vocals$', '', raw_source_stem, flags=re.IGNORECASE)
+        
+        parent_audio_dir = SEGMENTS_BASE_DIR / clean_source_name
+        parent_audio_dir.mkdir(parents=True, exist_ok=True)
+        prefix_str = "seg_single" if is_single and active_speakers else "segment"
+        existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
+        specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
+        specific_segment_dir.mkdir(parents=True, exist_ok=True)
+
+        total_duration = vocal_audio_data.shape[0] / TARGET_SAMPLE_RATE
+        raw_speaker_turns = [(0.0, total_duration, "SPEAKER_00")]
+
+        # 단일 파일 ASR 및 후처리 저장 로직...
+        temp_segments = []
+        for start, end, orig_speaker in raw_speaker_turns:
+            chunk_audio = vocal_audio_data[int(start * TARGET_SAMPLE_RATE):int(end * TARGET_SAMPLE_RATE)]
+            chunk_text = ""
+            try:
+                with torch.no_grad():
+                    res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
+                chunk_text = res_chunk.text if hasattr(res_chunk, "text") else str(res_chunk)
+            except Exception:
+                pass
+
+            chunk_txt = post_processor.process_segment_text(chunk_text, recent_texts=[], current_start=start, mapped_speaker=orig_speaker)
+            if chunk_txt.strip():
+                temp_segments.append({"start": start, "end": end, "speaker": orig_speaker, "text": chunk_txt, "audio": chunk_audio})
+
+        POST_DIR.mkdir(exist_ok=True)
+        ASR_DIR.mkdir(exist_ok=True)
+        post_file_path = POST_DIR / f"{clean_source_name}_post_001.txt"
+        asr_file_path = ASR_DIR / f"{clean_source_name}_asr_001.txt"
+
+        with open(post_file_path, "w", encoding="utf-8") as post_file_obj, open(asr_file_path, "w", encoding="utf-8") as asr_file_obj:
+            post_file_obj.write(f"=== 대화 로그 ({file_path}) ===\n\n")
+            for idx, seg in enumerate(temp_segments, 1):
+                base_seg_name = f"seg_sub_{idx-1:03d}_{seg['speaker']}_{seg['start']:.1f}s-{seg['end']:.1f}s"
+                save_wav_chunk(seg["audio"], TARGET_SAMPLE_RATE, specific_segment_dir / f"{base_seg_name}.wav")
+                (specific_segment_dir / f"{base_seg_name}.txt").write_text(seg['text'], encoding="utf-8")
+                log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
+                post_file_obj.write(log_line + "\n")
+                asr_file_obj.write(log_line + "\n")
+    except Exception as e:
+        log_error(MODULE_NAME, f"단일 파일 분석 중 예외 발생 ({file_path})", e)
 
 def select_and_process_audio_file(model=None):
     ensure_directories()
     
     if not AUDIO_DIR.exists():
         print("\n[알림] 'audio' 폴더가 존재하지 않습니다.")
-        log_info(MODULE_NAME, "'audio' 폴더가 존재하지 않습니다.")
         return
 
     def process_target_file(target_file):
         current_model = model or load_asr_model()
         if current_model is None:
             print("[오류] 모델을 로드할 수 없습니다.")
-            log_error(MODULE_NAME, "대상 파일 처리 실패: ASR 모델을 로드할 수 없습니다.", RuntimeError("Model load failed"))
             return
 
         try:
-            try:
-                sample_audio_data, sr = sf.read(str(target_file))
-            except Exception as e:
-                log_error(MODULE_NAME, f"선택된 오디오 파일 읽기 실패 ({target_file.name})", e)
-                return
-
+            sample_audio_data, sr = sf.read(str(target_file))
             if sample_audio_data.ndim > 1:
                 sample_audio_data = np.mean(sample_audio_data, axis=1)
             sample_audio_data = sample_audio_data.astype(np.float32)
@@ -661,9 +634,6 @@ def select_and_process_audio_file(model=None):
             active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
             if active_speakers is not None or analysis_mode != 3:
                 execute_analysis_flow(current_model, str(target_file), active_speakers, is_single, analysis_mode)
-            else:
-                print("[알림] 분석이 취소되었습니다.")
-                log_info(MODULE_NAME, f"사용자에 의해 분석이 취소됨: {target_file.name}")
         except Exception as e:
             log_error(MODULE_NAME, f"파일 처리 중 예외 발생 ({target_file.name})", e)
 
@@ -755,18 +725,26 @@ def select_and_process_audio_file(model=None):
 
                 if not sub_wavs:
                     print("[알림] 해당 폴더에 WAV 파일이 없습니다.")
-                    try:
-                        input("계속하려면 엔터를 누르세요...")
-                    except Exception:
-                        pass
                     continue
-                
-                print(f"\n[알림] 총 {len(sub_wavs)}개의 분할된 음원을 개별적으로 UVR5 분리 -> 화자 분리 -> ASR -> 후처리 파이프라인에 순차적으로 통과시킵니다.")
-                
+
+                # [핵심 요구사항] 폴더 내 모든 파일의 UVR5 결과가 존재하는지 사전 확인 후 전부 존재하면 스킵
+                target_uvr5_dir = target_folder / "uvr5"
+                all_uvr_exists = True
+                for sw in sub_wavs:
+                    expected_vocal = target_uvr5_dir / f"{sw.stem}_Vocals.wav"
+                    if not expected_vocal.exists():
+                        all_uvr_exists = False
+                        break
+
+                if all_uvr_exists and len(sub_wavs) > 0:
+                    print(f"\n[알림] 자동녹화 폴더 '{target_folder.name}'의 모든 음원에 대한 UVR5 보컬 파일이 이미 존재하므로 UVR5 분리를 전체 스킵합니다.")
+                    log_info(MODULE_NAME, f"자동녹화 폴더 '{target_folder.name}' UVR5 존재 확인 완료 -> 전체 스킵")
+                else:
+                    print(f"\n[알림] 자동녹화 폴더 '{target_folder.name}' 내부의 음원들에 대한 UVR5 분리를 진행합니다.")
+
                 current_model = model or load_asr_model()
                 if current_model is None:
                     print("[오류] 모델을 로드할 수 없습니다.")
-                    log_error(MODULE_NAME, "일괄 파일 처리 실패: ASR 모델을 로드할 수 없습니다.", RuntimeError("Model load failed"))
                     return
 
                 try:
@@ -779,24 +757,13 @@ def select_and_process_audio_file(model=None):
                     active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
                     if active_speakers is None and analysis_mode == 3:
                         print("[알림] 분석이 취소되었습니다.")
-                        log_info(MODULE_NAME, "사용자에 의해 일괄 분석이 취소됨")
                         return
                 except Exception as e:
                     log_error(MODULE_NAME, "분석 파이프라인 설정 중 예외 발생", e)
                     return
 
-                # [핵심] 폴더 내부의 모든 5분 분할 WAV 파일을 하나씩 차례대로 각각 UVR5 -> ASR -> 후처리 수행
-                for idx, target_file in enumerate(sub_wavs, 1):
-                    log_info(MODULE_NAME, f"일괄 순차 처리 진행 중 ({idx}/{len(sub_wavs)}): {target_file.name}")
-                    print(f"\n==============================================")
-                    print(f" [진행 상황] ({idx}/{len(sub_wavs)}) 파일 개별 파이프라인 시작 -> {target_file.name}")
-                    print(f"==============================================")
-                    try:
-                        execute_analysis_flow(current_model, str(target_file), active_speakers, is_single, analysis_mode)
-                    except Exception as e:
-                        log_error(MODULE_NAME, f"파일 순차 처리 중 예외 발생 ({target_file.name})", e)
-                
-                print(f"\n[알림] 자동녹화 폴더 '{target_folder.name}'의 모든 5분 분할 음원 처리가 완료되었습니다.")
+                # 개별 파일별 파이프라인 실행 대신, 통합 일괄 분석 플로우 호출하여 하나의 세그먼트 폴더 및 최종 텍스트로 저장
+                execute_batch_analysis_flow(current_model, sub_wavs, active_speakers, is_single, analysis_mode, target_folder.name)
                 return
         else:
             process_target_file(item_data)
