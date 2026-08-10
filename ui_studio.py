@@ -624,55 +624,50 @@ def run_data_refinement_webui():
                 return [new_items, history, redo, "삭제된 세그먼트는 분할할 수 없습니다.", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo)), page_num, [], f"### 페이지: {page_num} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
 
             try:
-                base_dir = os.path.dirname(target_item["wav"])
-                base_name = os.path.splitext(target_item["wav_filename"])[0]
+                wav_path = target_item["wav"]
+                txt_path = target_item["txt"]
                 
-                temp_wav_1 = os.path.join(base_dir, f"{base_name}_part1.wav")
-                temp_txt_1 = os.path.join(base_dir, f"{base_name}_part1.txt")
-                temp_wav_2 = os.path.join(base_dir, f"{base_name}_part2.wav")
-                temp_txt_2 = os.path.join(base_dir, f"{base_name}_part2.txt")
+                # 🔥 즉시 백엔드 함수 호출하여 실제 파일 생성
+                success, msg, split_files = ah.split_audio_segment(wav_path, txt_path)
+                if not success or len(split_files) < 2:
+                    total_pages = int(np.ceil(len(new_items) / ITEMS_PER_PAGE))
+                    return [new_items, history, redo, f"분할 실패: {msg}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo)), page_num, [], f"### 페이지: {page_num} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+
+                new_wav_1, new_wav_2 = split_files[0], split_files[1]
+                base_name1 = os.path.splitext(os.path.basename(new_wav_1))[0]
+                base_name2 = os.path.splitext(os.path.basename(new_wav_2))[0]
+                new_txt_1 = os.path.join(os.path.dirname(new_wav_1), f"{base_name1}.txt")
+                new_txt_2 = os.path.join(os.path.dirname(new_wav_2), f"{base_name2}.txt")
+
+                content = target_item["content"]
                 
+                for t_p in [new_txt_1, new_txt_2]:
+                    with open(t_p, "w", encoding="utf-8") as f:
+                        f.write(content)
+
                 speaker_num = target_item["speaker_num"]
                 is_mixed = target_item["is_mixed"]
                 folder_name = target_item["folder_name"]
                 
-                content = target_item["content"]
-                
                 ins1 = {
-                    "wav": temp_wav_1,
-                    "txt": temp_txt_1,
-                    "content": content,
-                    "original_content": content,
-                    "deleted": False,
-                    "folder_name": folder_name,
-                    "wav_filename": f"{base_name}_part1.wav",
-                    "speaker_num": speaker_num,
-                    "is_mixed": is_mixed,
-                    "is_temp": True,
-                    "saved": False,
-                    "selected": False,
-                    "action_type": "split_source",
-                    "virtual_sources": [target_item["wav"]]
+                    "wav": new_wav_1, "txt": new_txt_1, "content": content, "original_content": content,
+                    "deleted": False, "folder_name": folder_name, "wav_filename": os.path.basename(new_wav_1),
+                    "speaker_num": speaker_num, "is_mixed": is_mixed, "is_temp": False, "saved": True, "selected": False
                 }
                 ins2 = {
-                    "wav": temp_wav_2,
-                    "txt": temp_txt_2,
-                    "content": content,
-                    "original_content": content,
-                    "deleted": False,
-                    "folder_name": folder_name,
-                    "wav_filename": f"{base_name}_part2.wav",
-                    "speaker_num": speaker_num,
-                    "is_mixed": is_mixed,
-                    "is_temp": True,
-                    "saved": False,
-                    "selected": False,
-                    "action_type": "split_source",
-                    "virtual_sources": []
+                    "wav": new_wav_2, "txt": new_txt_2, "content": content, "original_content": content,
+                    "deleted": False, "folder_name": folder_name, "wav_filename": os.path.basename(new_wav_2),
+                    "speaker_num": speaker_num, "is_mixed": is_mixed, "is_temp": False, "saved": True, "selected": False
                 }
                 
                 new_items[global_idx]["deleted"] = True 
                 new_items[global_idx]["selected"] = False
+                if os.path.exists(target_item["wav"]):
+                    try: os.remove(target_item["wav"])
+                    except: pass
+                if os.path.exists(target_item["txt"]):
+                    try: os.remove(target_item["txt"])
+                    except: pass
 
                 new_items.insert(global_idx + 1, ins2)
                 new_items.insert(global_idx + 1, ins1)
@@ -699,7 +694,7 @@ def run_data_refinement_webui():
                     else:
                         updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), False, "", ""])
 
-                return [new_items, new_history, new_redo, f"세그먼트 #{global_idx+1} 분할 완료", gr.update(interactive=True), gr.update(interactive=False), page_num, [], f"### 페이지: {page_num} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + updates
+                return [new_items, new_history, new_redo, f"세그먼트 #{global_idx+1} 즉시 분할 완료", gr.update(interactive=True), gr.update(interactive=False), page_num, [], f"### 페이지: {page_num} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + updates
             except Exception as e:
                 log_error(MODULE_NAME, "세그먼트 분할 중 예외 발생", e, debug=True)
                 total_pages = int(np.ceil(len(new_items) / ITEMS_PER_PAGE))
@@ -730,34 +725,53 @@ def run_data_refinement_webui():
                 first_idx = selected_global_indices[0]
                 item1 = new_items[first_idx]
                 
-                base_dir = os.path.dirname(item1["wav"])
-                base_name1 = os.path.splitext(item1["wav_filename"])[0]
-                merged_wav_path = os.path.join(base_dir, f"{base_name1}_merged.wav")
-                merged_txt_path = os.path.join(base_dir, f"{base_name1}_merged.txt")
-                
-                combined_texts = []
-                merged_sources = []
-                for idx in selected_global_indices:
+                cur_w = item1["wav"]
+                cur_t = item1["txt"]
+                combined_texts = [item1["content"]]
+                sources_to_delete = []
+
+                # 🔥 즉시 순차 합병 실행
+                for idx in selected_global_indices[1:]:
                     it = new_items[idx]
+                    next_w = it["wav"]
+                    next_t = it["txt"]
+                    
+                    success, msg, res_info = ah.merge_audio_segments(cur_w, next_w, cur_t, next_t)
+                    if not success or not res_info:
+                        total_pages = int(np.ceil(len(new_items) / ITEMS_PER_PAGE))
+                        return [new_items, history, redo, f"합병 중 오류 발생: {msg}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo)), page_num, [], f"### 페이지: {page_num} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {page_num} / {total_pages}"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                    
+                    if cur_w != item1["wav"] and os.path.exists(cur_w):
+                        sources_to_delete.append(cur_w)
+                        
+                    cur_w = res_info["wav"]
+                    cur_t = res_info["txt"]
                     combined_texts.append(it["content"])
-                    merged_sources.append(it["wav"])
-                    if idx != first_idx:
-                        new_items[idx]["deleted"] = True 
-                        new_items[idx]["selected"] = False
+                    sources_to_delete.append(next_w)
+                    sources_to_delete.append(next_t)
+                    
+                    new_items[idx]["deleted"] = True 
+                    new_items[idx]["selected"] = False
 
                 final_combined_text = " ".join([t for t in combined_texts if t]).strip()
+                
+                with open(cur_t, "w", encoding="utf-8") as tf:
+                    tf.write(final_combined_text)
 
-                new_items[first_idx]["wav"] = merged_wav_path
-                new_items[first_idx]["txt"] = merged_txt_path
+                new_items[first_idx]["wav"] = cur_w
+                new_items[first_idx]["txt"] = cur_t
                 new_items[first_idx]["content"] = final_combined_text
                 new_items[first_idx]["original_content"] = final_combined_text
-                new_items[first_idx]["wav_filename"] = os.path.basename(merged_wav_path)
-                new_items[first_idx]["is_temp"] = True
-                new_items[first_idx]["saved"] = False
+                new_items[first_idx]["wav_filename"] = os.path.basename(cur_w)
+                new_items[first_idx]["is_temp"] = False
+                new_items[first_idx]["saved"] = True
                 new_items[first_idx]["selected"] = False
-                new_items[first_idx]["action_type"] = "merge_source"
-                new_items[first_idx]["virtual_sources"] = merged_sources
                 new_items[first_idx]["is_mixed"] = False
+
+                for sw in set(sources_to_delete):
+                    if os.path.exists(sw):
+                        try: os.remove(sw)
+                        except: pass
 
                 new_history = history + [clone_items(items)]
                 new_redo = []
@@ -784,7 +798,7 @@ def run_data_refinement_webui():
                     else:
                         updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), False, "", ""])
 
-                return [new_items, new_history, new_redo, f"선택된 {len(selected_global_indices)}개 세그먼트 합병 대기 완료 (저장 시 실제 파일 생성 및 확정)", gr.update(interactive=True), gr.update(interactive=False), target_page, [], f"### 페이지: {target_page} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {target_page} / {total_pages}"] + updates
+                return [new_items, new_history, new_redo, f"선택된 세그먼트 즉시 합병 완료", gr.update(interactive=True), gr.update(interactive=False), target_page, [], f"### 페이지: {target_page} / {total_pages} (총 {len(new_items)}개 항목)", f"### 페이지: {target_page} / {total_pages}"] + updates
             except Exception as e:
                 log_error(MODULE_NAME, "선택 세그먼트 합병 중 예외 발생", e, debug=True)
                 total_pages = int(np.ceil(len(new_items) / ITEMS_PER_PAGE))
@@ -872,27 +886,6 @@ def run_data_refinement_webui():
             try:
                 current_state = sync_current_data(items, page_num, current_texts, current_checkboxes)
                 
-                # 저장 시점에 실제 분할/합병 백엔드 실행 및 파일 생성
-                for item in current_state:
-                    if item.get("action_type") == "split_source":
-                        v_sources = item.get("virtual_sources", [])
-                        if v_sources and os.path.exists(v_sources[0]):
-                            parent_wav = v_sources[0]
-                            parent_base = os.path.splitext(parent_wav)[0]
-                            parent_txt = f"{parent_base}.txt"
-                            ah.split_audio_segment(parent_wav, parent_txt)
-                    elif item.get("action_type") == "merge_source":
-                        v_sources = item.get("virtual_sources", [])
-                        if len(v_sources) >= 2:
-                            cur_w = v_sources[0]
-                            cur_t = f"{os.path.splitext(cur_w)[0]}.txt"
-                            for sw in v_sources[1:]:
-                                st = f"{os.path.splitext(sw)[0]}.txt"
-                                _, _, res_info = ah.merge_audio_segments(cur_w, sw, cur_t, st)
-                                if res_info:
-                                    cur_w = res_info["wav"]
-                                    cur_t = res_info["txt"]
-
                 surviving_items = []
                 for item in current_state:
                     if item["deleted"]:
@@ -903,18 +896,6 @@ def run_data_refinement_webui():
                             try: os.remove(item["txt"])
                             except: pass
                     else:
-                        # 🔥 합병된 항목의 경우, 참여했던 원본 소스 파일들(virtual_sources) 물리 삭제 처리 보완
-                        if item.get("action_type") == "merge_source":
-                            for sw in item.get("virtual_sources", []):
-                                st = f"{os.path.splitext(sw)[0]}.txt"
-                                if sw != item["wav"]:
-                                    if os.path.exists(sw):
-                                        try: os.remove(sw)
-                                        except: pass
-                                    if os.path.exists(st):
-                                        try: os.remove(st)
-                                        except: pass
-
                         with open(item["txt"], "w", encoding="utf-8") as tf:
                             tf.write(item["content"])
                         item["original_content"] = item["content"]
