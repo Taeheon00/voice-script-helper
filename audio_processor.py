@@ -415,7 +415,8 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                         if duration >= 1.0:
                             raw_speaker_turns.append((turn.start, turn.end, speaker))
                         else:
-                            log_error(MODULE_NAME, f"화자 분리 턴 구간이 너무 짧아 제외됨 ({turn.start:.1f}s ~ {turn.end:.1f}s)", ValueError("Turn duration too short"))
+                            # 화자 분리 턴 구간이 짧아 제외되는 경우는 음원 분석상 자연스러운 현상이므로 에러 로그를 제외함
+                            pass
                     
                     print()
                     log_info(MODULE_NAME, f"화자 분리 완료 (소요 시간: {format_time(time.time() - diar_start_time)})")
@@ -513,7 +514,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 chunk_txt = ""
 
             if not chunk_txt.strip():
-                log_error(MODULE_NAME, f"후처리 후 빈 텍스트로 판정되어 구간이 필터링됨 ({start:.1f}s ~ {end:.1f}s)", ValueError("Filtered out empty chunk text"))
+                # 후처리 과정에서 텍스트가 필터링되거나 환각 처리되는 것은 음원 특성에 따른 정상 동작이므로 에러 로그를 제외함
                 continue
             
             temp_segments.append({
