@@ -38,22 +38,38 @@ def load_config():
 CONFIG = load_config()
 
 def ensure_handler_directories():
-    os.makedirs(STORAGE_DIR, exist_ok=True)
+    try:
+        os.makedirs(STORAGE_DIR, exist_ok=True)
+    except Exception as e:
+        log_error(MODULE_NAME, f"저장 디렉토리 생성 실패 ({STORAGE_DIR})", e)
 
 def load_existing_profiles():
     ensure_handler_directories()
-    if not os.path.exists(STORAGE_DIR):
+    try:
+        if not os.path.exists(STORAGE_DIR):
+            log_info(MODULE_NAME, f"저장 디렉토리가 존재하지 않습니다: {STORAGE_DIR}")
+            return []
+        profiles = [f[:-5] for f in os.listdir(STORAGE_DIR) if f.endswith(".json")]
+        if not profiles:
+            log_info(MODULE_NAME, "저장된 알고리즘 프로파일이 존재하지 않습니다.")
+        return profiles
+    except Exception as e:
+        log_error(MODULE_NAME, "기존 프로파일 목록 로드 중 예외 발생", e)
         return []
-    return [f[:-5] for f in os.listdir(STORAGE_DIR) if f.endswith(".json")]
 
 def _extract_pitch_features(audio_path):
     """공통 피치 추출 및 통계값 계산 헬퍼 함수 (안전성 강화)"""
     try:
+        if not os.path.exists(audio_path):
+            log_error(MODULE_NAME, f"오디오 파일을 찾을 수 없습니다: {audio_path}")
+            return 0.0, 0.0, 0.0, np.array([])
+
         y, sr = librosa.load(audio_path, sr=None)
         pitches, _ = librosa.piptrack(y=y, sr=sr)
         pitch_values = pitches[pitches > 0]
         
         if len(pitch_values) == 0:
+            log_info(MODULE_NAME, f"사소한 경고: 오디오에서 유효한 피치 값이 검출되지 않았습니다 ({audio_path})")
             return 0.0, 0.0, 0.0, np.array([])
 
         mean_pitch = float(np.mean(pitch_values))
@@ -69,9 +85,8 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text, raw_stt_
     
     mean_pitch, min_pitch, max_pitch, _ = _extract_pitch_features(audio_path)
     
-    # 유효하지 않은 피치 데이터(0점)가 샘플에 오염되는 것 방지
     if min_pitch == 0.0 and max_pitch == 0.0:
-        log_info(MODULE_NAME, f"경고: 유효한 피치가 검출되지 않았습니다 ({audio_path})")
+        log_info(MODULE_NAME, f"경고: 유효한 피치가 검출되지 않아 기본값으로 처리됩니다 ({audio_path})")
 
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     
@@ -80,7 +95,7 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text, raw_stt_
             with open(file_path, "r", encoding="utf-8") as f:
                 algo_data = json.load(f)
         except Exception as e:
-            log_error(MODULE_NAME, f"프로파일 파일 로드 실패 ({file_path})", e)
+            log_error(MODULE_NAME, f"프로파일 파일 로드 실패, 새로 생성합니다 ({file_path})", e)
             algo_data = {}
     else:
         algo_data = {}
@@ -114,6 +129,8 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text, raw_stt_
             "min": float(np.min(all_mins)),
             "max": float(np.max(all_maxs))
         }
+    else:
+        log_info(MODULE_NAME, f"사소한 경고: 샘플 내 유효한 글로벌 피치 범위를 산출할 수 없습니다 ({algo_name})")
 
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -129,6 +146,7 @@ def apply_text_corrections(text, algo_name):
         
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     if not os.path.exists(file_path):
+        log_info(MODULE_NAME, f"사소한 알림: 보정 대상 프로파일 파일이 존재하지 않습니다 ({algo_name})")
         return text
 
     try:
@@ -154,10 +172,14 @@ def apply_text_corrections(text, algo_name):
 
 def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_ratio=0.3):
     if CONFIG.get("enable_gpu_cache_clear", True):
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+        except Exception as e:
+            log_error(MODULE_NAME, "GPU 캐시 비우기 중 사소한 예외 발생", e)
 
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     if not os.path.exists(file_path):
+        log_info(MODULE_NAME, f"사소한 경고: 검증할 알고리즘 프로파일 파일을 찾을 수 없습니다 ({algo_name})")
         return False
 
     try:
@@ -169,6 +191,7 @@ def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_
 
     global_range = algo_data.get("pitch_range_global")
     if not global_range:
+        log_info(MODULE_NAME, f"사소한 경고: 프로파일에 pitch_range_global이 설정되어 있지 않습니다 ({algo_name})")
         return False
 
     _, _, _, pitch_values = _extract_pitch_features(audio_path)
@@ -184,7 +207,11 @@ def verify_pitch_match_flexible(algo_name, audio_path, tolerance=45.0, required_
     mean_pitch = np.mean(pitch_values)
     is_mean_in_range = (global_range["min"] - tolerance <= mean_pitch <= global_range["max"] + tolerance)
 
-    return (match_ratio >= required_ratio) or is_mean_in_range
+    is_matched = (match_ratio >= required_ratio) or is_mean_in_range
+    if not is_matched:
+        log_info(MODULE_NAME, f"사소한 알림: 화자 피치 검증 매칭 실패 (algo: {algo_name}, ratio: {match_ratio:.2f})")
+
+    return is_matched
 
 def verify_single_speaker(algo_name, audio_path):
     return verify_pitch_match_flexible(algo_name, audio_path)
@@ -192,15 +219,17 @@ def verify_single_speaker(algo_name, audio_path):
 def verify_multi_speakers_auto(audio_path):
     existing_profiles = load_existing_profiles()
     if not existing_profiles:
+        log_info(MODULE_NAME, "다중 화자 자동 검증 실패: 등록된 알고리즘 프로파일이 없습니다.")
         return False, "등록된 알고리즘 프로파일이 없습니다."
 
     matched_any = False
     for algo_name in existing_profiles:
         if verify_pitch_match_flexible(algo_name, audio_path):
             matched_any = True
-            break  # 하나라도 매칭되면 즉시 탈출 (과거 로직의 안정성 복원)
+            break 
 
     if not matched_any:
+        log_info(MODULE_NAME, f"다중 화자 자동 검증 실패: 일치하는 화자를 찾을 수 없음 ({audio_path})")
         return False, "오디오 내에 일치하는 등록된 화자 알고리즘이 전혀 없어 분석을 진행할 수 없습니다."
 
     return True, "다중 화자 검증 통과"
@@ -210,7 +239,12 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
         log_error(MODULE_NAME, f"지정된 폴더를 찾을 수 없습니다: {folder_path}")
         return False
         
-    wav_files = [f for f in os.listdir(folder_path) if f.endswith(".wav")]
+    try:
+        wav_files = [f for f in os.listdir(folder_path) if f.endswith(".wav")]
+    except Exception as e:
+        log_error(MODULE_NAME, f"폴더 파일 목록 읽기 실패 ({folder_path})", e)
+        return False
+
     if not wav_files:
         log_info(MODULE_NAME, f"폴더 내에 .wav 파일이 없습니다: {folder_path}")
         return False
@@ -221,7 +255,6 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
         txt_path = os.path.join(folder_path, f"{base_name}.txt")
         raw_txt_path = os.path.join(folder_path, f"{base_name}.raw_txt")
         
-        # [안전장치 복원] 텍스트 변수 기본값 초기화
         corrected_text = ""
         if os.path.exists(txt_path):
             try:
@@ -230,7 +263,6 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
             except Exception as e:
                 log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({txt_path})", e)
                 
-        # [안전장치 복원] raw_stt_text 미정의 에러(NameError) 방지
         raw_stt_text = corrected_text
         if os.path.exists(raw_txt_path):
             try:
