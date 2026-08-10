@@ -42,10 +42,9 @@ except ImportError as e:
     HAS_PYANNOTE = False
     log_error(MODULE_NAME, "pyannote.audio 패키지 로드 실패 (화자 분리 기능을 사용할 수 없습니다)", e)
 
-# 디렉토리 구조 설정
+# 디렉토리 구조 설정 (불필요한 공통 AUTO_UVR5_DIR 제거)
 AUDIO_DIR = Path("audio")
 AUTO_REC_DIR = AUDIO_DIR / "auto_recorded_audio"
-AUTO_UVR5_DIR = AUTO_REC_DIR / "uvr5"
 MANUAL_UVR5_DIR = AUDIO_DIR / "uvr5"
 SEGMENTS_BASE_DIR = Path("segments_base")
 ASR_DIR = Path("asr_output")
@@ -75,11 +74,11 @@ def load_config():
 CONFIG = load_config()
 
 def ensure_directories():
+    # AUTO_UVR5_DIR은 각 세션별로 동적 생성되므로 공통 생성 목록에서 제외
     for d in [
         AUDIO_DIR,
         MANUAL_UVR5_DIR,
         AUTO_REC_DIR,
-        AUTO_UVR5_DIR,
         SEGMENTS_BASE_DIR,
         ASR_DIR,
         POST_DIR,
@@ -186,12 +185,17 @@ def apply_uvr5_vocal_extraction(input_audio_path):
     ensure_directories()
     abs_input_path = Path(input_audio_path).resolve()
     
-    target_uvr5_dir = AUTO_UVR5_DIR if AUTO_REC_DIR.resolve() in abs_input_path.parents else MANUAL_UVR5_DIR
+    # [핵심] 각 자동녹화 세션 폴더 하위에 독립적인 uvr5 폴더 지정 (예: auto_recorded_audio/자동녹화001/uvr5/)
+    if AUTO_REC_DIR.resolve() in abs_input_path.parents:
+        target_uvr5_dir = abs_input_path.parent / "uvr5"
+    else:
+        target_uvr5_dir = MANUAL_UVR5_DIR
+        
     target_uvr5_dir.mkdir(parents=True, exist_ok=True)
 
     base_name = abs_input_path.stem
-    
     expected_vocal_path = target_uvr5_dir / f"{base_name}_Vocals.wav"
+    
     if expected_vocal_path.exists():
         log_info(MODULE_NAME, f"UVR5 보컬 파일 존재: {expected_vocal_path.name}")
         return str(expected_vocal_path)
@@ -757,7 +761,42 @@ def select_and_process_audio_file(model=None):
                         pass
                     continue
                 
-                process_target_file(sub_wavs[0])
+                print(f"\n[알림] 총 {len(sub_wavs)}개의 분할된 음원을 개별적으로 UVR5 분리 -> 화자 분리 -> ASR -> 후처리 파이프라인에 순차적으로 통과시킵니다.")
+                
+                current_model = model or load_asr_model()
+                if current_model is None:
+                    print("[오류] 모델을 로드할 수 없습니다.")
+                    log_error(MODULE_NAME, "일괄 파일 처리 실패: ASR 모델을 로드할 수 없습니다.", RuntimeError("Model load failed"))
+                    return
+
+                try:
+                    sample_audio_data, sr = sf.read(str(sub_wavs[0]))
+                    if sample_audio_data.ndim > 1:
+                        sample_audio_data = np.mean(sample_audio_data, axis=1)
+                    sample_audio_data = sample_audio_data.astype(np.float32)
+                    sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
+                        
+                    active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+                    if active_speakers is None and analysis_mode == 3:
+                        print("[알림] 분석이 취소되었습니다.")
+                        log_info(MODULE_NAME, "사용자에 의해 일괄 분석이 취소됨")
+                        return
+                except Exception as e:
+                    log_error(MODULE_NAME, "분석 파이프라인 설정 중 예외 발생", e)
+                    return
+
+                # [핵심] 폴더 내부의 모든 5분 분할 WAV 파일을 하나씩 차례대로 각각 UVR5 -> ASR -> 후처리 수행
+                for idx, target_file in enumerate(sub_wavs, 1):
+                    log_info(MODULE_NAME, f"일괄 순차 처리 진행 중 ({idx}/{len(sub_wavs)}): {target_file.name}")
+                    print(f"\n==============================================")
+                    print(f" [진행 상황] ({idx}/{len(sub_wavs)}) 파일 개별 파이프라인 시작 -> {target_file.name}")
+                    print(f"==============================================")
+                    try:
+                        execute_analysis_flow(current_model, str(target_file), active_speakers, is_single, analysis_mode)
+                    except Exception as e:
+                        log_error(MODULE_NAME, f"파일 순차 처리 중 예외 발생 ({target_file.name})", e)
+                
+                print(f"\n[알림] 자동녹화 폴더 '{target_folder.name}'의 모든 5분 분할 음원 처리가 완료되었습니다.")
                 return
         else:
             process_target_file(item_data)
