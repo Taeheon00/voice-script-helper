@@ -67,9 +67,9 @@ def load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            log_error(MODULE_NAME, "config.json 로드 실패", e)
+            log_info(MODULE_NAME, "config.json 로드 실패 (기본 설정 사용)")
     else:
-        log_error(MODULE_NAME, "config.json 파일이 존재하지 않아 기본 설정을 사용합니다.", FileNotFoundError("config.json not found"))
+        log_info(MODULE_NAME, "config.json 파일이 존재하지 않아 기본 설정을 사용합니다.")
     return {}
 
 CONFIG = load_config()
@@ -102,11 +102,11 @@ def get_huggingface_token():
             if token: 
                 return token
             else:
-                log_error(MODULE_NAME, "허깅페이스 토큰 파일이 비어 있습니다.", ValueError("Empty token file"))
+                log_info(MODULE_NAME, "허깅페이스 토큰 파일이 비어 있습니다.")
         except Exception as e:
             log_error(MODULE_NAME, "허깅페이스 토큰 파일 읽기 실패", e)
     else:
-        log_error(MODULE_NAME, "허깅페이스 토큰 파일(hf_token.txt)이 존재하지 않습니다.", FileNotFoundError("hf_token.txt not found"))
+        log_info(MODULE_NAME, "허깅페이스 토큰 파일(hf_token.txt)이 존재하지 않습니다.")
     return None
 
 def format_time(seconds):
@@ -123,7 +123,6 @@ def format_time(seconds):
             s = seconds % 60
             return f"{h}시간 {m}분 {s:.1f}초"
     except Exception as e:
-        log_error(MODULE_NAME, f"시간 포맷 변환 중 사소한 예외 발생 (값: {seconds})", e)
         return f"{seconds}초"
 
 def save_wav_chunk(audio_data, sample_rate, filename):
@@ -168,20 +167,20 @@ def resample_audio(audio_data, original_sr, target_sr=TARGET_SAMPLE_RATE):
         duration = audio_data.shape[0] / float(original_sr)
         target_length = int(round(duration * target_sr))
         if target_length <= 0:
-            log_error(MODULE_NAME, f"리샘플링 대상 길이 오류 (원본 SR: {original_sr}, 타겟 SR: {target_sr})", ValueError("Invalid target length"))
+            log_info(MODULE_NAME, f"리샘플링 대상 길이 오류 (원본 SR: {original_sr}, 타겟 SR: {target_sr})")
             return np.zeros((0,), dtype=np.float32)
         orig_times = np.linspace(0.0, duration, num=audio_data.shape[0], endpoint=False)
         target_times = np.linspace(0.0, duration, num=target_length, endpoint=False)
         return np.interp(target_times, orig_times, audio_data).astype(np.float32)
     except Exception as e:
-        log_error(MODULE_NAME, f"오디오 리샘플링 중 예외 발생 (Original SR: {original_sr}, Target SR: {target_sr})", e)
+        log_info(MODULE_NAME, f"오디오 리샘플링 중 예외 발생 (Original SR: {original_sr}, Target SR: {target_sr})")
         return audio_data.astype(np.float32)
 
 def apply_uvr5_vocal_extraction(input_audio_path):
     global _uvr5_separator_instance
     if not HAS_UVR5:
         err_msg = "audio-separator 패키지가 없어 UVR5 분기를 수행할 수 없습니다."
-        log_error(MODULE_NAME, err_msg, RuntimeError(err_msg))
+        log_info(MODULE_NAME, err_msg)
         raise RuntimeError(err_msg)
 
     ensure_directories()
@@ -225,7 +224,7 @@ def apply_uvr5_vocal_extraction(input_audio_path):
             return str(vocal_file)
             
         err_msg = f"UVR5 Vocals 파일을 찾지 못했습니다: {base_name}"
-        log_error(MODULE_NAME, err_msg, RuntimeError(err_msg))
+        log_info(MODULE_NAME, err_msg)
         raise RuntimeError(err_msg)
     except Exception as e:
         log_error(MODULE_NAME, f"UVR5 보컬 분리 프로세스 중 예외 발생 ({base_name})", e)
@@ -244,7 +243,7 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
         try:
             mode = input("선택: ").strip()
         except Exception as e:
-            log_error(MODULE_NAME, "분석 모드 입력 수신 중 예외 발생", e)
+            log_info(MODULE_NAME, "분석 모드 입력 수신 중 예외 발생")
             continue
         
         if mode == "3":
@@ -255,45 +254,45 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
         try:
             existing = ah.load_existing_profiles()
         except Exception as e:
-            log_error(MODULE_NAME, "기존 화자 프로파일 로드 실패", e)
+            log_info(MODULE_NAME, "기존 화자 프로파일 로드 실패")
             existing = []
             
         if mode == "1":
             if not existing:
                 print("[알림] 등록된 프로파일이 없습니다.")
-                log_error(MODULE_NAME, "단일 화자 분석 실패: 등록된 프로파일이 없습니다.", ValueError("No profiles found"))
+                log_info(MODULE_NAME, "단일 화자 분석 알림: 등록된 프로파일이 없습니다.")
                 continue
             try:
                 matched_speakers = [algo_name for algo_name in existing if ah.verify_single_speaker(algo_name, audio_data)]
             except Exception as e:
-                log_error(MODULE_NAME, "단일 화자 검증 중 예외 발생", e)
+                log_info(MODULE_NAME, "단일 화자 검증 중 예외 발생")
                 matched_speakers = []
 
             if not matched_speakers:
                 print("[차단] 일치하는 화자 프로파일이 없습니다.")
-                log_error(MODULE_NAME, "단일 화자 분석 차단: 일치하는 화자 프로파일이 없습니다.", ValueError("No matching speaker profile"))
+                log_info(MODULE_NAME, "단일 화자 분석 차단: 일치하는 화자 프로파일이 없습니다.")
                 continue
             return [matched_speakers[0]], True, 1
             
         elif mode == "2":
             if not existing:
                 print("[알림] 등록된 프로파일이 없습니다.")
-                log_error(MODULE_NAME, "다중 화자 분석 실패: 등록된 프로파일이 없습니다.", ValueError("No profiles found"))
+                log_info(MODULE_NAME, "다중 화자 분석 알림: 등록된 프로파일이 없습니다.")
                 continue
             try:
                 success, msg = ah.verify_multi_speakers_auto(audio_data)
             except Exception as e:
-                log_error(MODULE_NAME, "다중 화자 검증 중 예외 발생", e)
+                log_info(MODULE_NAME, "다중 화자 검증 중 예외 발생")
                 success, msg = False, str(e)
 
             if not success:
                 print(f"[차단] {msg}")
-                log_error(MODULE_NAME, f"다중 화자 분석 차단: {msg}", ValueError(msg))
+                log_info(MODULE_NAME, f"다중 화자 분석 차단: {msg}")
                 continue
             return existing, False, 2
         else:
             print("[오류] 올바른 번호를 입력해주세요.")
-            log_error(MODULE_NAME, f"잘못된 분석 모드 번호 입력됨: {mode}", ValueError("Invalid analysis mode choice"))
+            log_info(MODULE_NAME, f"잘못된 분석 모드 번호 입력됨: {mode}")
 
 def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis_mode=0):
     log_info(MODULE_NAME, f"분석 실행: {Path(file_path).name}")
@@ -317,7 +316,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         if max_val > 1e-5:
             audio_data = audio_data / max_val
         else:
-            log_error(MODULE_NAME, f"원본 오디오 신호 크기가 너무 작습니다 (Max: {max_val})", ValueError("Audio level too low"))
+            log_info(MODULE_NAME, f"원본 오디오 신호 크기가 너무 작습니다 (Max: {max_val})")
 
         try:
             processed_vocal_path = apply_uvr5_vocal_extraction(file_path)
@@ -341,7 +340,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         if max_val > 0.0001:
             vocal_audio_data = vocal_audio_data / max_val
         else:
-            log_error(MODULE_NAME, f"보컬 오디오 신호 크기가 너무 작습니다 (Max: {max_val})", ValueError("Vocal audio level too low"))
+            log_info(MODULE_NAME, f"보컬 오디오 신호 크기가 너무 작습니다 (Max: {max_val})")
 
         raw_source_stem = Path(file_path).stem
         clean_source_name = re.sub(r'_Vocals$', '', raw_source_stem, flags=re.IGNORECASE)
@@ -356,7 +355,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         try:
             existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
         except Exception as e:
-            log_error(MODULE_NAME, f"세그먼트 하위 디렉토리 검색 실패 ({parent_audio_dir})", e)
+            log_info(MODULE_NAME, f"세그먼트 하위 디렉토리 검색 실패 ({parent_audio_dir})")
             existing_subdirs = []
             
         specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
@@ -409,13 +408,12 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                             sys.stdout.write("\r" + progress_msg)
                             sys.stdout.flush()
                         except Exception as ex:
-                            log_error(MODULE_NAME, "진행률 출력 중 사소한 예외 발생", ex)
+                            pass
 
                         duration = turn.end - turn.start
                         if duration >= 1.0:
                             raw_speaker_turns.append((turn.start, turn.end, speaker))
                         else:
-                            # 화자 분리 턴 구간이 짧아 제외되는 경우는 음원 분석상 자연스러운 현상이므로 에러 로그를 제외함
                             pass
                     
                     print()
@@ -424,15 +422,15 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 except Exception as ex:
                     log_error(MODULE_NAME, "화자 분리 수행 중 예외 발생", ex)
             else:
-                log_error(MODULE_NAME, "화자 분리 토큰이 없어 PyAnnote 파이프라인을 건너뜁니다.", ValueError("No HuggingFace token"))
+                log_info(MODULE_NAME, "화자 분리 토큰이 없어 PyAnnote 파이프라인을 건너뜁니다.")
         else:
             if not HAS_PYANNOTE:
-                log_error(MODULE_NAME, "pyannote 패키지가 없어 화자 분리 단계를 건너뜁니다.", ImportError("PyAnnote not installed"))
+                log_info(MODULE_NAME, "pyannote 패키지가 없어 화자 분리 단계를 건너뜁니다.")
             elif is_single:
                 log_info(MODULE_NAME, "단일 화자 모드이므로 화자 분리 단계를 건너뜁니다.")
         
         if not raw_speaker_turns:
-            log_error(MODULE_NAME, "화자 분리 결과 구간이 없어 전체 통으로 기본 세그먼트를 할당합니다.", ValueError("No speaker turns found, fallback to full duration"))
+            log_info(MODULE_NAME, "화자 분리 결과 구간이 없어 전체 통으로 기본 세그먼트를 할당합니다.")
             raw_speaker_turns.append((0.0, total_duration, "SPEAKER_00"))
 
         speaker_mapping = {}
@@ -475,7 +473,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 sys.stdout.write("\r" + progress_msg)
                 sys.stdout.flush()
             except Exception as ex:
-                log_error(MODULE_NAME, "ASR 진행률 출력 중 사소한 예외 발생", ex)
+                pass
 
             mapped_speaker = speaker_mapping.get(orig_speaker, "SPEAKER_00")
             start_sample = int(start * TARGET_SAMPLE_RATE)
@@ -500,7 +498,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 except Exception as e:
                     log_error(MODULE_NAME, f"구간 {idx} ASR 변환 실패 ({start:.1f}s ~ {end:.1f}s)", e)
             else:
-                log_error(MODULE_NAME, f"구간 {idx} 오디오 데이터 크기가 0입니다 ({start:.1f}s ~ {end:.1f}s)", ValueError("Empty chunk audio size"))
+                log_info(MODULE_NAME, f"구간 {idx} 오디오 데이터 크기가 0입니다 ({start:.1f}s ~ {end:.1f}s)")
 
             try:
                 chunk_txt = post_processor.process_segment_text(
@@ -514,7 +512,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                 chunk_txt = ""
 
             if not chunk_txt.strip():
-                # 후처리 과정에서 텍스트가 필터링되거나 환각 처리되는 것은 음원 특성에 따른 정상 동작이므로 에러 로그를 제외함
                 continue
             
             temp_segments.append({
@@ -551,7 +548,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                     prev["text"] = f"{prev['text']} {seg['text']}".strip()
                     prev["audio"] = new_chunk_audio
                 except Exception as e:
-                    log_error(MODULE_NAME, "세그먼트 병합 과정 중 사소한 예외 발생", e)
                     merged_segments.append(seg)
             else:
                 merged_segments.append(seg)
@@ -567,7 +563,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
             post_file_path = POST_DIR / f"{clean_source_name}_post_{len(list(POST_DIR.glob(f'{clean_source_name}_post_*.txt'))) + 1:03d}.txt"
             asr_file_path = ASR_DIR / f"{clean_source_name}_asr_{len(list(ASR_DIR.glob(f'{clean_source_name}_asr_*.txt'))) + 1:03d}.txt"
         except Exception as e:
-            log_error(MODULE_NAME, "출력 파일 경로 생성 중 예외 발생", e)
             post_file_path = POST_DIR / f"{clean_source_name}_post_001.txt"
             asr_file_path = ASR_DIR / f"{clean_source_name}_asr_001.txt"
 
@@ -602,7 +597,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                         sys.stdout.write("\r" + progress_msg)
                         sys.stdout.flush()
                     except Exception as ex:
-                        log_error(MODULE_NAME, "저장 진행률 출력 중 사소한 예외 발생", ex)
+                        pass
 
                     saved_segment_count += 1
                     safe_speaker_name = str(seg["speaker"]).replace("/", "_").replace("\\", "_")
@@ -637,7 +632,7 @@ def select_and_process_audio_file(model=None):
     
     if not AUDIO_DIR.exists():
         print("\n[알림] 'audio' 폴더가 존재하지 않습니다.")
-        log_error(MODULE_NAME, "'audio' 폴더가 존재하지 않습니다.", FileNotFoundError("audio directory not found"))
+        log_info(MODULE_NAME, "'audio' 폴더가 존재하지 않습니다.")
         return
 
     def process_target_file(target_file):
@@ -672,7 +667,6 @@ def select_and_process_audio_file(model=None):
         try:
             root_wavs = sorted([f for f in AUDIO_DIR.glob("*.wav") if "vocal" not in f.name.lower() and "instrumental" not in f.name.lower()], key=lambda x: x.name)
         except Exception as e:
-            log_error(MODULE_NAME, "audio 폴더 내 WAV 파일 검색 실패", e)
             root_wavs = []
 
         menu_items = [('auto', '자동녹화')] + [('file', wf) for wf in root_wavs]
@@ -691,12 +685,10 @@ def select_and_process_audio_file(model=None):
         try:
             choice = input("분석할 항목 번호를 선택하세요: ").strip()
         except Exception as e:
-            log_error(MODULE_NAME, "메뉴 선택 입력 수신 중 예외 발생", e)
             continue
 
         if not choice.isdigit():
             print("[오류] 올바른 번호를 입력해주세요.")
-            log_error(MODULE_NAME, f"잘못된 메뉴 번호 형식 입력됨: {choice}", ValueError("Invalid menu input format"))
             continue
             
         choice_val = int(choice)
@@ -706,7 +698,6 @@ def select_and_process_audio_file(model=None):
         adjusted_idx = choice_val - 1
         if not (0 <= adjusted_idx < len(menu_items)):
             print("[오류] 잘못된 번호입니다. 다시 선택해주세요.")
-            log_error(MODULE_NAME, f"범위를 벗어난 메뉴 번호 선택됨: {choice_val}", ValueError("Menu choice out of range"))
             continue
             
         item_type, item_data = menu_items[adjusted_idx]
@@ -716,12 +707,10 @@ def select_and_process_audio_file(model=None):
                 try:
                     auto_subdirs = sorted([d for d in AUTO_REC_DIR.iterdir() if d.is_dir() and d.name.lower() != "uvr5"], key=lambda x: x.name) if AUTO_REC_DIR.exists() else []
                 except Exception as e:
-                    log_error(MODULE_NAME, "자동녹화 하위 폴더 검색 실패", e)
                     auto_subdirs = []
 
                 if not auto_subdirs:
                     print("\n[알림] 생성된 자동녹화 폴더가 존재하지 않습니다.")
-                    log_error(MODULE_NAME, "자동녹화 하위 폴더가 존재하지 않습니다.", FileNotFoundError("Auto record subdirectories not found"))
                     break
 
                 sub_menu_items = [('folder', sd) for sd in auto_subdirs]
@@ -739,12 +728,10 @@ def select_and_process_audio_file(model=None):
                 try:
                     sub_choice = input("탐색할 폴더 번호를 선택하세요: ").strip()
                 except Exception as e:
-                    log_error(MODULE_NAME, "자동녹화 서브메뉴 입력 수신 중 예외 발생", e)
                     continue
 
                 if not sub_choice.isdigit():
                     print("[오류] 올바른 번호를 입력해주세요.")
-                    log_error(MODULE_NAME, f"잘못된 서브메뉴 번호 형식 입력됨: {sub_choice}", ValueError("Invalid submenu input format"))
                     continue
                     
                 sub_val = int(sub_choice)
@@ -754,19 +741,16 @@ def select_and_process_audio_file(model=None):
                 sub_adjusted_idx = sub_val - 1
                 if not (0 <= sub_adjusted_idx < len(sub_menu_items)):
                     print("[오류] 잘못된 번호입니다. 다시 선택해주세요.")
-                    log_error(MODULE_NAME, f"범위를 벗어난 서브메뉴 번호 선택됨: {sub_val}", ValueError("Submenu choice out of range"))
                     continue
                     
                 target_folder = sub_menu_items[sub_adjusted_idx][1]
                 try:
                     sub_wavs = sorted(list(target_folder.glob("*.wav")), key=lambda x: x.name)
                 except Exception as e:
-                    log_error(MODULE_NAME, f"폴더 내 WAV 검색 실패 ({target_folder.name})", e)
                     sub_wavs = []
 
                 if not sub_wavs:
                     print("[알림] 해당 폴더에 WAV 파일이 없습니다.")
-                    log_error(MODULE_NAME, f"선택한 자동녹화 폴더에 WAV 파일이 없습니다 ({target_folder.name})", FileNotFoundError("No WAV files in folder"))
                     try:
                         input("계속하려면 엔터를 누르세요...")
                     except Exception:
