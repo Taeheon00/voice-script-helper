@@ -115,7 +115,6 @@ class ConnectionDisconnectFilter(logging.Filter):
             "broken pipe",
             "websockets.exceptions",
             "peer closed connection",
-            
         ]
         
         lower_msg = message.lower()
@@ -135,7 +134,6 @@ class StderrDisconnectFilter:
             "broken pipe",
             "websockets.exceptions",
             "peer closed connection",
-            
         ]
 
     def write(self, text):
@@ -234,9 +232,9 @@ def run_data_refinement_webui():
 
         with gr.Row():
             gr.Markdown("## 🛠️ 데이터 정제 및 화자 알고리즘 등록 스튜디오")
-            close_ui_btn = gr.Button("🚪 Web UI 종료 (메뉴로 돌아가기)", variant="stop")
+            close_ui_btn = gr.Button("🚪 Web UI 종료 ", variant="stop")
 
-        gr.Markdown("💡 **안내:** 사용자의 편집 행위를 최우선으로 반영하며, 동적 증감에 따라 페이지 수가 유연하게 조절됩니다.")
+        gr.Markdown("💡 **안내:** 종료버튼 클릭 시 터미널에서 엔터를 누르면 메뉴로 돌아가게 됩니다.")
 
         with gr.Row(variant="panel"):
             with gr.Column():
@@ -262,12 +260,12 @@ def run_data_refinement_webui():
         info_box = gr.Textbox(label="현재 진행 상황", value="작업할 폴더를 선택하고 '불러오기' 버튼을 누르세요.", interactive=False)
 
         with gr.Row(elem_classes=["pagination-toolbar"]):
-            prev_btn = gr.Button("⬅️ 이전 페이지 ")
+            prev_btn = gr.Button("⬅️ 이전 페이지 ", interactive=False)
             page_info_md = gr.Markdown("### 페이지: 0 / 0 (총 0개 항목)", elem_classes=["page-info"])
             merge_selected_btn = gr.Button("🔗 선택 합병", variant="secondary", scale=0, min_width=130)
             undo_global_btn = gr.Button("↩️", elem_classes=["icon-btn"], interactive=False, scale=0, min_width=55)
             redo_global_btn = gr.Button("🔁", elem_classes=["icon-btn"], interactive=False, scale=0, min_width=55)
-            next_btn = gr.Button("다음 페이지 ➡️ ")
+            next_btn = gr.Button("다음 페이지 ➡️ ", interactive=False)
 
         row_components = []
         audio_components = []
@@ -302,39 +300,45 @@ def run_data_refinement_webui():
             wav_path_components.append(wp_comp)
 
         with gr.Row():
-            with gr.Column(scale=1): prev_btn_bottom = gr.Button("⬅️ 이전 페이지 ")
+            with gr.Column(scale=1): prev_btn_bottom = gr.Button("⬅️ 이전 페이지 ", interactive=False)
             with gr.Column(scale=1): page_info_md_bottom = gr.Markdown("### 페이지: 0 / 0", elem_classes=["page-info-bottom"])
-            with gr.Column(scale=1): next_btn_bottom = gr.Button("다음 페이지 ➡️ ")
+            with gr.Column(scale=1): next_btn_bottom = gr.Button("다음 페이지 ➡️ ", interactive=False)
 
         close_ui_btn.click(fn=None, inputs=[], outputs=[], js="() => { window.close(); }").then(fn=lambda: demo.close(), outputs=[])
 
+        def get_pagination_states(page_num, total_pages):
+            has_prev = page_num > 1
+            has_next = page_num < total_pages
+            return gr.update(interactive=has_prev), gr.update(interactive=has_next), gr.update(interactive=has_prev), gr.update(interactive=has_next)
+
         def load_folder_data(folder_name):
             cleanup_old_temp_files()
+            empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
             if not folder_name:
                 msg = "폴더가 선택되지 않았습니다."
                 log_error(MODULE_NAME, msg, ValueError(msg))
-                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
+                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
             
             target_dir = os.path.join(SEGMENTS_BASE_DIR, folder_name)
             is_valid, inspect_msg = inspect_all_files(target_dir)
             if not is_valid:
-                return [[], [], [], 1, inspect_msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
+                return [[], [], [], 1, inspect_msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
 
             if not os.path.exists(target_dir):
                 msg = "존재하지 않는 폴더입니다."
                 log_error(MODULE_NAME, f"{msg}: {target_dir}", FileNotFoundError(target_dir))
-                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
+                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
                 
             try:
                 wav_files = sorted([f for f in os.listdir(target_dir) if f.lower().endswith('.wav')])
             except Exception as e:
                 log_error(MODULE_NAME, f"디렉토리 읽기 오류: {folder_name}", e)
-                return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
+                return [[], [], [], 1, f"디렉토리 읽기 오류: {e}", "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
 
             if not wav_files:
                 msg = "해당 폴더에 WAV 파일이 없습니다."
                 log_error(MODULE_NAME, f"{msg} ({folder_name})", ValueError(msg))
-                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
+                return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
                 
             items = []
             for w_f in wav_files:
@@ -393,13 +397,14 @@ def run_data_refinement_webui():
                 else:
                     updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), False, "", ""])
             
-            return [items, [], [], 1, status_msg, f"### 페이지: 1 / {total_pages} (총 {len(surviving)}개 유효 항목)", f"### 페이지: 1 / {total_pages}", gr.update(interactive=False), gr.update(interactive=False)] + updates
+            p_prev, p_next, p_prev_b, p_next_b = get_pagination_states(1, total_pages)
+            return [items, [], [], 1, status_msg, f"### 페이지: 1 / {total_pages} (총 {len(surviving)}개 유효 항목)", f"### 페이지: 1 / {total_pages}", p_prev, p_next, p_prev_b, p_next_b] + updates
 
         def render_page(items, page_num):
             cleanup_old_temp_files()
             surviving = [it for it in items if not it["deleted"]]
             if not surviving:
-                return [1, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                return [1, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             
             total_pages = int(np.ceil(len(surviving) / ITEMS_PER_PAGE))
             if page_num < 1: page_num = 1
@@ -433,7 +438,8 @@ def run_data_refinement_webui():
                 else:
                     updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), False, "", ""])
             
-            return [page_num, f"### 페이지: {page_num} / {total_pages} (총 {len(surviving)}개 유효 항목)", f"### 페이지: {page_num} / {total_pages}"] + updates
+            p_prev, p_next, p_prev_b, p_next_b = get_pagination_states(page_num, total_pages)
+            return [page_num, f"### 페이지: {page_num} / {total_pages} (총 {len(surviving)}개 유효 항목)", f"### 페이지: {page_num} / {total_pages}", p_prev, p_next, p_prev_b, p_next_b] + updates
 
         def sync_current_data(items, page_num, current_texts, current_checkboxes):
             if not items:
@@ -486,7 +492,7 @@ def run_data_refinement_webui():
             if not items:
                 msg = "항목이 없습니다."
                 log_error(MODULE_NAME, f"삭제 실패: {msg}", ValueError(msg))
-                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             
             new_items = sync_current_data(items, page_num, current_texts, current_checkboxes)
             surviving = [it for it in new_items if not it["deleted"]]
@@ -519,7 +525,8 @@ def run_data_refinement_webui():
             if not items:
                 msg = "항목이 없습니다."
                 log_error(MODULE_NAME, f"분할 실패: {msg}", ValueError(msg))
-                return [items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo)), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                return [items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo)), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             
             new_items = sync_current_data(items, page_num, current_texts, current_checkboxes)
             surviving = [it for it in new_items if not it["deleted"]]
@@ -605,7 +612,8 @@ def run_data_refinement_webui():
             if not items:
                 msg = "항목이 없습니다."
                 log_error(MODULE_NAME, f"합병 실패: {msg}", ValueError(msg))
-                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             
             half_len = len(text_components)
             current_texts = args[:half_len]
@@ -741,7 +749,8 @@ def run_data_refinement_webui():
             if not items:
                 msg = "저장할 데이터가 없습니다."
                 log_error(MODULE_NAME, f"저장 실패: {msg}", ValueError(msg))
-                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False)]
+                empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False)] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             try:
                 current_state = sync_current_data(items, page_num, current_texts, current_checkboxes)
                 surviving_items = []
@@ -774,13 +783,13 @@ def run_data_refinement_webui():
 
         refresh_btn.click(fn=lambda: (gr.Dropdown(choices=get_single_speaker_folders()), gr.Dropdown(choices=get_basic_segment_folders())), outputs=[single_dropdown, basic_dropdown])
         
-        load_outputs = [state_items, state_history, state_redo, state_page, info_box, page_info_md, page_info_md_bottom, undo_global_btn, redo_global_btn]
+        load_outputs = [state_items, state_history, state_redo, state_page, info_box, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): load_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
             
         load_single_btn.click(fn=load_folder_data, inputs=[single_dropdown], outputs=load_outputs)
         load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
 
-        pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom]
+        pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): pagination_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
 
         prev_btn.click(fn=lambda items, p, *args: change_page(items, p, -1, *args), inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
@@ -792,13 +801,13 @@ def run_data_refinement_webui():
             for trigger_event in [t_comp.blur, t_comp.submit]:
                 trigger_event(fn=handle_text_commit, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=[state_items, state_history, state_redo, undo_global_btn, redo_global_btn])
 
-        undo_redo_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom]
+        undo_redo_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): undo_redo_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
 
         undo_global_btn.click(fn=handle_undo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
         redo_global_btn.click(fn=handle_redo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
 
-        common_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom]
+        common_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): common_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
 
         merge_selected_btn.click(fn=handle_selected_merge, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
@@ -807,7 +816,7 @@ def run_data_refinement_webui():
             delete_btn_components[i].click(fn=lambda items, history, redo, p_num, *args, idx=i: handle_single_delete(items, history, redo, p_num, idx, *args), inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
             split_btn_components[i].click(fn=lambda items, history, redo, p_num, *args, idx=i: handle_single_split(items, history, redo, p_num, idx, *args), inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
 
-        save_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom]
+        save_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): save_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
 
         save_all_btn.click(fn=save_all_changes, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=save_outputs)
@@ -822,7 +831,7 @@ def run_data_refinement_webui():
                 msg = "[오류] 로드된 데이터가 없습니다."
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
                 return msg
-            new_items, _, _, save_msg, _, _, _, _, _ = save_all_changes(items, history, redo, page_num, *args)
+            new_items, _, _, save_msg, _, _, _, _, _, _, _, _, _ = save_all_changes(items, history, redo, page_num, *args)
             if "[오류]" in save_msg:
                 log_error(MODULE_NAME, f"알고리즘 등록 전 저장 실패: {save_msg}", ValueError(save_msg))
                 return f"등록 실패: {save_msg}"

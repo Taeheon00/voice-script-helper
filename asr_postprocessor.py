@@ -93,15 +93,13 @@ def normalize_korean_numbers_strict(text):
 
 def clean_text_advanced(text):
     """
-    1. 외국어(중/일) 환각 텍스트 차단
-    2. 커스텀 숫자 정규화 적용 (normalize_korean_numbers_strict)
-    3. 자음/모음 과다 반복 정제 (예: ㅋㅋㅋ 등)
-    4. Kiwipiepy 형태소 분석 기반 문장 경계 정돈
+    기존에 차단(스킵)하던 외국어 환각 및 노이즈 성향 감지 시, 
+    스킵하지 않고 완전히 비어 있는 텍스트("") 상태로 반환하도록 변경합니다.
     """
     if not text:
         return ""
     
-    # 중/일 문자가 포함된 환각 텍스트 차단
+    # 중/일 문자가 포함된 경우 기존에는 차단했으나, 완전히 비어있는 텍스트로 변환
     if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\u31f0-\u31ff]', text):
         return ""
         
@@ -110,8 +108,9 @@ def clean_text_advanced(text):
     # 수동 숫자 변환 규칙 적용
     cleaned = normalize_korean_numbers_strict(cleaned)
     
-    # 자음/모음 과다 반복 정제
-    cleaned = re.sub(r"([ㄱ-ㅎㅏ-ㅣ])\1{4,}", "", cleaned)
+    # 자음/모음 과다 반복 정제 (노이즈성 반복 감지 시 빈 텍스트로 처리 가능하도록 반영)
+    if re.search(r"([ㄱ-ㅎㅏ-ㅣ])\1{4,}", cleaned):
+        return ""
     
     # 형태소 분석을 통한 문장 경계 정돈
     if kiwi:
@@ -128,6 +127,7 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
     """
     [통합 후처리 진입점]
     세그먼트 단위로 넘어온 ASR 텍스트를 후처리합니다.
+    조건에 해당하여 걸러지던 기존 방식 대신 완전히 비어 있는 텍스트로 반환합니다.
     """
     try:
         if not chunk_text:
@@ -141,7 +141,7 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         if not raw_text:
             return ""
 
-        # 문장 길이 방어: 노이즈로 인해 잘려 들어온 무의미한 파편 필터링
+        # 문장 길이 방어: 기존엔 스킵했으나 비어 있는 텍스트("")로 반환
         if len(raw_text) < 2 and not re.search(r'[0-9]', raw_text):
             return ""
 
@@ -152,7 +152,6 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
                 if abs(current_start - prev_start) < 4.0:
                     cleaned_prev = re.sub(r'[\s\.,!]', '', prev_txt).lower()
                     if cleaned_prev in cleaned_current or cleaned_current in cleaned_prev:
-                        
                         return "" 
 
             recent_texts.append((raw_text, current_start))
@@ -189,9 +188,9 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
                     language="ko", 
                     vad_filter=True, 
                     vad_parameters=dict(
-                        threshold=0.35,            # 음성 판정 민감도를 조정하여 미세 잔향을 묵음으로 유도
-                        min_silence_duration_ms=250,  # 0.25초 이상의 공백을 묵음으로 확실히 캐치
-                        speech_pad_ms=100           # 패딩을 최적화하여 앞뒤 음성 뭉침 방지
+                        threshold=0.35,            
+                        min_silence_duration_ms=250,  
+                        speech_pad_ms=100           
                     ),
                     without_timestamps=False
                 )
@@ -200,12 +199,10 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
                     seg_text = getattr(segment, "text", "")
                     if seg_text and seg_text.strip():
                         refined_seg = clean_text_advanced(seg_text.strip())
-                        if refined_seg:
-                            full_texts.append(refined_seg)
-                        else:
-                            pass
+                        # 빈 텍스트 상태("")인 경우에도 그대로 추가하여 위치나 구조를 유지하도록 함
+                        full_texts.append(refined_seg)
                     else:
-                        pass
+                        full_texts.append("")
                         
             except (TypeError, AttributeError) as te:
                 log_error(MODULE_NAME, "고급 전역 transcribe 실패로 인해 청크 단위 폴백(Fallback) 처리로 전환합니다.", te)
@@ -223,12 +220,9 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
                     chunk_text = res_chunk.text if hasattr(res_chunk, "text") else str(res_chunk)
                     if chunk_text.strip():
                         refined_chunk = clean_text_advanced(chunk_text.strip())
-                        if refined_chunk:
-                            full_texts.append(refined_chunk)
-                        else:
-                            pass
+                        full_texts.append(refined_chunk)
                     else:
-                        pass
+                        full_texts.append("")
 
         full_audio_text = " ".join(full_texts)
         if not full_audio_text:
