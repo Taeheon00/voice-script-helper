@@ -3,6 +3,7 @@ import re
 import tempfile
 import sys
 import asyncio
+import logging
 import numpy as np
 import gradio as gr
 from pydub import AudioSegment
@@ -97,23 +98,85 @@ def inspect_all_files(target_dir):
         log_error(MODULE_NAME, f"파일 전체 검사 중 오류 발생: {target_dir}", e)
         return False, f"검사 중 오류 발생: {e}"
 
+# --- [기존 차단 구조 유지 및 보완] 호스트 연결 종료/차단 경고 정밀 차단 필터 및 표준 에러 가드 ---
+class ConnectionDisconnectFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if record.exc_info:
+            exc_type, exc_value, _ = record.exc_info
+            if exc_type:
+                message += f" {exc_type.__name__} {str(exc_value)}"
+        
+        ignore_keywords = [
+            "ConnectionResetError",
+            "WinError 10054",
+            "connection reset",
+            "connection closed",
+            "broken pipe",
+            "websockets.exceptions",
+            "peer closed connection",
+            
+        ]
+        
+        lower_msg = message.lower()
+        for kw in ignore_keywords:
+            if kw.lower() in lower_msg:
+                return False
+        return True
+
+class StderrDisconnectFilter:
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+        self.ignore_keywords = [
+            "ConnectionResetError",
+            "WinError 10054",
+            "connection reset",
+            "connection closed",
+            "broken pipe",
+            "websockets.exceptions",
+            "peer closed connection",
+            
+        ]
+
+    def write(self, text):
+        lower_text = text.lower()
+        if any(kw.lower() in lower_text for kw in self.ignore_keywords):
+            return
+        self.original_stderr.write(text)
+
+    def flush(self):
+        self.original_stderr.flush()
+
+def setup_connection_log_suppression():
+    target_loggers = ["uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "websockets"]
+    filter_instance = ConnectionDisconnectFilter()
+    
+    for logger_name in target_loggers:
+        lg = logging.getLogger(logger_name)
+        lg.addFilter(filter_instance)
+        for handler in lg.handlers:
+            if filter_instance not in handler.filters:
+                handler.addFilter(filter_instance)
+
+    root_lg = logging.getLogger()
+    root_lg.addFilter(filter_instance)
+    for handler in root_lg.handlers:
+        if filter_instance not in handler.filters:
+            handler.addFilter(filter_instance)
+
+    if not isinstance(sys.stderr, StderrDisconnectFilter):
+        sys.stderr = StderrDisconnectFilter(sys.stderr)
+
 def run_data_refinement_webui():
     log_info(MODULE_NAME, "Web UI 스튜디오를 실행합니다...")
     
+    setup_connection_log_suppression()
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-    if sys.platform.startswith("win"):
-        def custom_exception_handler(loop, context):
-            exc = context.get('exception')
-            if isinstance(exc, ConnectionResetError) and getattr(exc, 'winerror', None) == 10054:
-                return
-            loop.default_exception_handler(context)
-        
-        loop.set_exception_handler(custom_exception_handler)
 
     single_folders = get_single_speaker_folders()
     basic_folders = get_basic_segment_folders()
