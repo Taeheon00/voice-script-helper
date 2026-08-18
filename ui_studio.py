@@ -98,7 +98,6 @@ def inspect_all_files(target_dir):
         log_error(MODULE_NAME, f"파일 전체 검사 중 오류 발생: {target_dir}", e)
         return False, f"검사 중 오류 발생: {e}"
 
-# --- [기존 차단 구조 유지 및 보완] 호스트 연결 종료/차단 경고 정밀 차단 필터 및 표준 에러 가드 ---
 class ConnectionDisconnectFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
@@ -108,13 +107,8 @@ class ConnectionDisconnectFilter(logging.Filter):
                 message += f" {exc_type.__name__} {str(exc_value)}"
         
         ignore_keywords = [
-            "ConnectionResetError",
-            "WinError 10054",
-            "connection reset",
-            "connection closed",
-            "broken pipe",
-            "websockets.exceptions",
-            "peer closed connection",
+            "ConnectionResetError", "WinError 10054", "connection reset",
+            "connection closed", "broken pipe", "websockets.exceptions", "peer closed connection"
         ]
         
         lower_msg = message.lower()
@@ -127,13 +121,8 @@ class StderrDisconnectFilter:
     def __init__(self, original_stderr):
         self.original_stderr = original_stderr
         self.ignore_keywords = [
-            "ConnectionResetError",
-            "WinError 10054",
-            "connection reset",
-            "connection closed",
-            "broken pipe",
-            "websockets.exceptions",
-            "peer closed connection",
+            "ConnectionResetError", "WinError 10054", "connection reset",
+            "connection closed", "broken pipe", "websockets.exceptions", "peer closed connection"
         ]
 
     def write(self, text):
@@ -167,7 +156,6 @@ def setup_connection_log_suppression():
 
 def run_data_refinement_webui():
     log_info(MODULE_NAME, "Web UI 스튜디오를 실행합니다...")
-    
     setup_connection_log_suppression()
 
     try:
@@ -279,7 +267,7 @@ def run_data_refinement_webui():
         for i in range(ITEMS_PER_PAGE):
             with gr.Row(visible=False) as r_box:
                 with gr.Column(scale=2):
-                    a_comp = gr.Audio(label=f"세그먼트 {i+1}", type="filepath", interactive=False)
+                    a_comp = gr.Audio(label=f"세그먼트 {i+1}", type="filepath", interactive=True, playback_position=0)
                 with gr.Column(scale=3):
                     t_comp = gr.Textbox(label=f"세그먼트 {i+1}", lines=2, interactive=True)
                 with gr.Column(scale=1, min_width=110):
@@ -304,12 +292,24 @@ def run_data_refinement_webui():
             with gr.Column(scale=1): page_info_md_bottom = gr.Markdown("### 페이지: 0 / 0", elem_classes=["page-info-bottom"])
             with gr.Column(scale=1): next_btn_bottom = gr.Button("다음 페이지 ➡️ ", interactive=False)
 
-        close_ui_btn.click(fn=None, inputs=[], outputs=[], js="() => { window.close(); }").then(fn=lambda: demo.close(), outputs=[])
+        # -------------------------------------------------------------
+        # 1. 독립형 이벤트 핸들러 함수 정의
+        # -------------------------------------------------------------
+        def handle_refresh_click():
+            return (
+                gr.Dropdown(choices=get_single_speaker_folders()),
+                gr.Dropdown(choices=get_basic_segment_folders())
+            )
 
         def get_pagination_states(page_num, total_pages):
             has_prev = page_num > 1
             has_next = page_num < total_pages
-            return gr.update(interactive=has_prev), gr.update(interactive=has_next), gr.update(interactive=has_prev), gr.update(interactive=has_next)
+            return (
+                gr.update(interactive=has_prev),
+                gr.update(interactive=has_next),
+                gr.update(interactive=has_prev),
+                gr.update(interactive=has_next)
+            )
 
         def load_folder_data(folder_name):
             cleanup_old_temp_files()
@@ -356,18 +356,10 @@ def run_data_refinement_webui():
                         t_content = ""
                 
                 items.append({
-                    "wav": w_path, 
-                    "txt": t_path, 
-                    "content": t_content, 
-                    "original_content": t_content, 
-                    "deleted": False, 
-                    "folder_name": folder_name, 
-                    "wav_filename": w_f,
-                    "speaker_num": "1",
-                    "is_mixed": False,
-                    "selected": False,
-                    "audio_segment": None,
-                    "is_new": False
+                    "wav": w_path, "txt": t_path, "content": t_content, "original_content": t_content, 
+                    "deleted": False, "folder_name": folder_name, "wav_filename": w_f,
+                    "speaker_num": "1", "is_mixed": False, "selected": False,
+                    "audio_segment": None, "is_new": False
                 })
             
             surviving = [it for it in items if not it["deleted"]]
@@ -456,7 +448,7 @@ def run_data_refinement_webui():
                     target_item["selected"] = bool(current_checkboxes[i])
             return updated
 
-        def change_page(items, current_page, direction, *args):
+        def change_page_wrapper(items, current_page, direction, *args):
             half = len(text_components)
             current_texts = args[:half]
             current_checkboxes = args[half:]
@@ -477,7 +469,6 @@ def run_data_refinement_webui():
                 return [items, history, redo, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))]
             
             current_state = sync_current_data(items, page_num, current_texts, current_checkboxes)
-            
             if current_state != items:
                 new_history = history + [clone_items(items)]
                 new_redo = []
@@ -492,7 +483,8 @@ def run_data_refinement_webui():
             if not items:
                 msg = "항목이 없습니다."
                 log_error(MODULE_NAME, f"삭제 실패: {msg}", ValueError(msg))
-                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)] + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
+                empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
+                return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=False), page_num, "### 페이지: 0 / 0", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None), gr.update(value=""), False, "", ""] * ITEMS_PER_PAGE
             
             new_items = sync_current_data(items, page_num, current_texts, current_checkboxes)
             surviving = [it for it in new_items if not it["deleted"]]
@@ -517,7 +509,7 @@ def run_data_refinement_webui():
             res = render_page(new_items, target_page)
             return [new_items, new_history, new_redo, f"세그먼트 삭제 대기됨 (저장 시 반영)", gr.update(interactive=True), gr.update(interactive=False)] + res
 
-        def handle_single_split(items, history, redo, page_num, item_index, *args):
+        def handle_single_split(items, history, redo, page_num, item_index, playback: gr.Audio, *args):
             half = len(text_components)
             current_texts = args[:half]
             current_checkboxes = args[half:]
@@ -559,9 +551,11 @@ def run_data_refinement_webui():
                     res = render_page(new_items, page_num)
                     return [new_items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
-                mid_ms = len(audio) // 2
-                part1_audio = audio[:mid_ms]
-                part2_audio = audio[mid_ms:]
+                position = float(playback.playback_position or 0.0)
+                split_ms = int(position * 1000)
+
+                part1_audio = audio[:split_ms]
+                part2_audio = audio[split_ms:]
 
                 target_item["deleted"] = True
                 target_item["selected"] = False
@@ -570,22 +564,17 @@ def run_data_refinement_webui():
                 base_name = os.path.splitext(target_item["wav_filename"])[0]
                 current_content = target_item["content"]
 
-                new_wav_path_1 = os.path.join(base_dir, f"{base_name}_part1.wav")
-                new_wav_path_2 = os.path.join(base_dir, f"{base_name}_part2.wav")
-                new_txt_path_1 = os.path.join(base_dir, f"{base_name}_part1.txt")
-                new_txt_path_2 = os.path.join(base_dir, f"{base_name}_part2.txt")
-
                 split_items = [
                     {
-                        "wav": new_wav_path_1, "txt": new_txt_path_1, "content": current_content, "original_content": "",
-                        "deleted": False, "folder_name": target_item["folder_name"], "wav_filename": f"{base_name}_part1.wav",
-                        "speaker_num": "1", "is_mixed": False, "selected": False,
+                        "wav": os.path.join(base_dir, f"{base_name}_part1.wav"), "txt": os.path.join(base_dir, f"{base_name}_part1.txt"),
+                        "content": current_content, "original_content": "", "deleted": False, "folder_name": target_item["folder_name"],
+                        "wav_filename": f"{base_name}_part1.wav", "speaker_num": "1", "is_mixed": False, "selected": False,
                         "audio_segment": part1_audio, "is_new": True
                     },
                     {
-                        "wav": new_wav_path_2, "txt": new_txt_path_2, "content": current_content, "original_content": "",
-                        "deleted": False, "folder_name": target_item["folder_name"], "wav_filename": f"{base_name}_part2.wav",
-                        "speaker_num": "1", "is_mixed": False, "selected": False,
+                        "wav": os.path.join(base_dir, f"{base_name}_part2.wav"), "txt": os.path.join(base_dir, f"{base_name}_part2.txt"),
+                        "content": current_content, "original_content": "", "deleted": False, "folder_name": target_item["folder_name"],
+                        "wav_filename": f"{base_name}_part2.wav", "speaker_num": "1", "is_mixed": False, "selected": False,
                         "audio_segment": part2_audio, "is_new": True
                     }
                 ]
@@ -624,7 +613,7 @@ def run_data_refinement_webui():
 
             if len(selected_items) < 2:
                 msg = "합병하려면 최소 2개 이상의 세그먼트를 체크해주세요."
-                log_error(MODULE_NAME, f"합병 실패: {msg} (선택된 개수: {len(selected_items)})", ValueError(msg))
+                log_error(MODULE_NAME, f"합병 실패: {msg}", ValueError(msg))
                 res = render_page(new_items, page_num)
                 return [new_items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
@@ -638,7 +627,7 @@ def run_data_refinement_webui():
                             t_audio = AudioSegment.from_wav(target_it["wav"])
                         else:
                             msg = "오디오 소스를 찾을 수 없습니다."
-                            log_error(MODULE_NAME, f"합병 실패: {msg} ({target_it['wav']})", FileNotFoundError(target_it['wav']))
+                            log_error(MODULE_NAME, f"합병 실패: {msg}", FileNotFoundError(target_it['wav']))
                             res = render_page(new_items, page_num)
                             return [new_items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
                     
@@ -650,7 +639,7 @@ def run_data_refinement_webui():
 
                 if len(cur_audio) > 60000:
                     msg = "합병된 오디오의 길이가 60초를 초과하여 합병할 수 없습니다."
-                    log_error(MODULE_NAME, f"합병 실패: {msg} (길이: {len(cur_audio)}ms)", ValueError(msg))
+                    log_error(MODULE_NAME, f"합병 실패: {msg}", ValueError(msg))
                     res = render_page(new_items, page_num)
                     return [new_items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
@@ -660,16 +649,12 @@ def run_data_refinement_webui():
                     target_it["selected"] = False
 
                 final_combined_text = " ".join([t.strip() for t in combined_texts if t.strip()]).strip()
-                
                 base_dir = os.path.dirname(first_item["wav"])
                 base_name = os.path.splitext(first_item["wav_filename"])[0]
 
-                merged_wav_path = os.path.join(base_dir, f"{base_name}_merged.wav")
-                merged_txt_path = os.path.join(base_dir, f"{base_name}_merged.txt")
-
                 merged_item = {
-                    "wav": merged_wav_path,
-                    "txt": merged_txt_path,
+                    "wav": os.path.join(base_dir, f"{base_name}_merged.wav"),
+                    "txt": os.path.join(base_dir, f"{base_name}_merged.txt"),
                     "content": final_combined_text,
                     "original_content": "",
                     "deleted": False,
@@ -691,7 +676,7 @@ def run_data_refinement_webui():
                 surviving = [it for it in new_items if not it["deleted"]]
                 target_page = (surviving.index(merged_item) // ITEMS_PER_PAGE) + 1 if merged_item in surviving else 1
                 res = render_page(new_items, target_page)
-                return [new_items, new_history, new_redo, f"선택된 {len(selected_items)}개 세그먼트 합병 완료 (저장 시 적용)", gr.update(interactive=True), gr.update(interactive=False)] + res
+                return [new_items, new_history, new_redo, f"선택된 {len(selected_items)}개 세그먼트 합병 완료 (저장 시 적용)", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
             except Exception as e:
                 log_error(MODULE_NAME, "세그먼트 합병 중 예외 발생", e)
                 res = render_page(new_items, page_num)
@@ -703,7 +688,7 @@ def run_data_refinement_webui():
             current_checkboxes = args[half:]
             if not history:
                 msg = "더 이상 되돌릴 수 없습니다."
-                log_error(MODULE_NAME, f"되돌리기(Undo) 실패: {msg}", ValueError(msg))
+                log_error(MODULE_NAME, f"되돌리기 실패: {msg}", ValueError(msg))
                 res = render_page(items, page_num)
                 return [items, history, redo, msg, gr.update(interactive=False), gr.update(interactive=bool(redo))] + res
             
@@ -725,7 +710,7 @@ def run_data_refinement_webui():
             current_checkboxes = args[half:]
             if not redo:
                 msg = "더 이상 앞으로 돌릴 수 없습니다."
-                log_error(MODULE_NAME, f"다시 실행(Redo) 실패: {msg}", ValueError(msg))
+                log_error(MODULE_NAME, f"다시 실행 실패: {msg}", ValueError(msg))
                 res = render_page(items, page_num)
                 return [items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=False)] + res
             
@@ -781,46 +766,6 @@ def run_data_refinement_webui():
                 res = render_page(items, page_num)
                 return [items, history, redo, f"[오류] 저장 실패: {e}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
-        refresh_btn.click(fn=lambda: (gr.Dropdown(choices=get_single_speaker_folders()), gr.Dropdown(choices=get_basic_segment_folders())), outputs=[single_dropdown, basic_dropdown])
-        
-        load_outputs = [state_items, state_history, state_redo, state_page, info_box, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
-        for i in range(ITEMS_PER_PAGE): load_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
-            
-        load_single_btn.click(fn=load_folder_data, inputs=[single_dropdown], outputs=load_outputs)
-        load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
-
-        pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
-        for i in range(ITEMS_PER_PAGE): pagination_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
-
-        prev_btn.click(fn=lambda items, p, *args: change_page(items, p, -1, *args), inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
-        prev_btn_bottom.click(fn=lambda items, p, *args: change_page(items, p, -1, *args), inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
-        next_btn.click(fn=lambda items, p, *args: change_page(items, p, 1, *args), inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
-        next_btn_bottom.click(fn=lambda items, p, *args: change_page(items, p, 1, *args), inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
-
-        for t_comp in text_components:
-            for trigger_event in [t_comp.blur, t_comp.submit]:
-                trigger_event(fn=handle_text_commit, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=[state_items, state_history, state_redo, undo_global_btn, redo_global_btn])
-
-        undo_redo_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
-        for i in range(ITEMS_PER_PAGE): undo_redo_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
-
-        undo_global_btn.click(fn=handle_undo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
-        redo_global_btn.click(fn=handle_redo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
-
-        common_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
-        for i in range(ITEMS_PER_PAGE): common_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
-
-        merge_selected_btn.click(fn=handle_selected_merge, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
-
-        for i in range(ITEMS_PER_PAGE):
-            delete_btn_components[i].click(fn=lambda items, history, redo, p_num, *args, idx=i: handle_single_delete(items, history, redo, p_num, idx, *args), inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
-            split_btn_components[i].click(fn=lambda items, history, redo, p_num, *args, idx=i: handle_single_split(items, history, redo, p_num, idx, *args), inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
-
-        save_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
-        for i in range(ITEMS_PER_PAGE): save_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
-
-        save_all_btn.click(fn=save_all_changes, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=save_outputs)
-
         def register_algo_action(speaker_name, items, history, redo, page_num, *args):
             speaker_name = speaker_name.strip()
             if not speaker_name:
@@ -850,10 +795,98 @@ def run_data_refinement_webui():
                 log_error(MODULE_NAME, f"화자 알고리즘 등록 중 예외 발생: {speaker_name}", e)
                 return f"[오류] 예외 발생: {e}"
 
+        # -------------------------------------------------------------
+        # 2. 버튼 및 이벤트 바인딩 (종료 버튼 동작 수정 반영)
+        # -------------------------------------------------------------
+        close_ui_btn.click(
+            fn=None, 
+            inputs=[], 
+            outputs=[], 
+            js="() => { window.close(); }"
+        ).then(
+            fn=lambda: demo.close(), 
+            outputs=[]
+        )
+
+        refresh_btn.click(fn=handle_refresh_click, outputs=[single_dropdown, basic_dropdown])
+        
+        load_outputs = [state_items, state_history, state_redo, state_page, info_box, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
+        for i in range(ITEMS_PER_PAGE): 
+            load_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
+            
+        load_single_btn.click(fn=load_folder_data, inputs=[single_dropdown], outputs=load_outputs)
+        load_basic_btn.click(fn=load_folder_data, inputs=[load_basic_btn], outputs=load_outputs) if False else load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
+
+        pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
+        for i in range(ITEMS_PER_PAGE): 
+            pagination_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
+
+        def on_prev_page(items, p, *args):
+            return change_page_wrapper(items, p, -1, *args)
+
+        def on_next_page(items, p, *args):
+            return change_page_wrapper(items, p, 1, *args)
+
+        prev_btn.click(fn=on_prev_page, inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
+        prev_btn_bottom.click(fn=on_prev_page, inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
+        next_btn.click(fn=on_next_page, inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
+        next_btn_bottom.click(fn=on_next_page, inputs=[state_items, state_page] + text_components + select_checkbox_components, outputs=pagination_outputs)
+
+        for t_comp in text_components:
+            for trigger_event in [t_comp.blur, t_comp.submit]:
+                trigger_event(fn=handle_text_commit, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=[state_items, state_history, state_redo, undo_global_btn, redo_global_btn])
+
+        undo_redo_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
+        for i in range(ITEMS_PER_PAGE): 
+            undo_redo_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
+
+        undo_global_btn.click(fn=handle_undo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
+        redo_global_btn.click(fn=handle_redo, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=undo_redo_outputs)
+
+        common_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
+        for i in range(ITEMS_PER_PAGE): 
+            common_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
+
+        merge_selected_btn.click(fn=handle_selected_merge, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=common_outputs)
+
+        def make_delete_handler(idx):
+            def delete_handler(items, history, redo, p_num, *args):
+                return handle_single_delete(items, history, redo, p_num, idx, *args)
+            return delete_handler
+
+        def make_split_handler(idx):
+            def split_handler(items, history, redo, p_num, playback: gr.Audio, *args):
+                return handle_single_split(items, history, redo, p_num, idx, playback, *args)
+            return split_handler
+
+        for i in range(ITEMS_PER_PAGE):
+            delete_btn_components[i].click(
+                fn=make_delete_handler(i), 
+                inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, 
+                outputs=common_outputs
+            )
+            split_btn_components[i].click(
+                fn=make_split_handler(i), 
+                inputs=[state_items, state_history, state_redo, state_page, audio_components[i]] + text_components + select_checkbox_components, 
+                outputs=common_outputs
+            )
+
+        save_outputs = [state_items, state_history, state_redo, info_box, undo_global_btn, redo_global_btn, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
+        for i in range(ITEMS_PER_PAGE): 
+            save_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
+
+        save_all_btn.click(fn=save_all_changes, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=save_outputs)
+
         register_algo_inputs = [speaker_name_input, state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components
         register_algo_btn.click(fn=register_algo_action, inputs=register_algo_inputs, outputs=[info_box])
 
+    # 서버 실행 (블로킹 방지 및 터미널 input 제어 방식 적용)
     demo.launch(inbrowser=True, server_name="127.0.0.1", server_port=None, prevent_thread_lock=True)
+    
     input("[*] Web UI가 실행되었습니다. 창을 닫거나 엔터를 누르면 종료됩니다.\n")
-    try: demo.close()
-    except: pass
+    try:
+        demo.close()
+    except:
+        pass
+        
+    log_info(MODULE_NAME, "Web UI 서버가 정상적으로 종료되었습니다.")
