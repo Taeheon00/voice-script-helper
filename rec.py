@@ -295,13 +295,20 @@ def record_and_transcribe(model=None):
                 except Exception as ex:
                     log_error(MODULE_NAME, "샘플 오디오 리샘플링 중 예외 발생", ex)
 
-            active_speakers, is_single = None, False
+            # 수정된 파이프라인 처리 로직
+            active_speakers, is_single, analysis_mode = None, False, 0
             if hasattr(ap, 'configure_strict_analysis_pipeline'):
                 try:
-                    active_speakers, is_single = ap.configure_strict_analysis_pipeline(sample_audio_data, target_sr)
+                    # 3개의 반환값을 모두 받도록 수정
+                    active_speakers, is_single, analysis_mode = ap.configure_strict_analysis_pipeline(sample_audio_data, target_sr)
                 except Exception as ex:
-                    log_error(MODULE_NAME, "엄격한 분석 파이프라인 설정 중 예외 발생", ex)
+                    log_error(MODULE_NAME, "분석 파이프라인 설정 중 예외 발생", ex)
 
+            # 분석 취소/복귀 조건 처리
+            if analysis_mode == 3 or active_speakers is None:
+                return
+
+            # 분석 진행
             if active_speakers is not None:
                 for target_file in target_files_to_analyze:
                     print(f"\n----------------------------------------------")
