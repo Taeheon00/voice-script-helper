@@ -267,7 +267,7 @@ def run_data_refinement_webui():
         for i in range(ITEMS_PER_PAGE):
             with gr.Row(visible=False) as r_box:
                 with gr.Column(scale=2):
-                    a_comp = gr.Audio(label=f"세그먼트 {i+1}", type="filepath", interactive=True, playback_position=0)
+                    a_comp = gr.Audio(label=f"세그먼트 {i+1}", type="filepath", interactive=False, playback_position=0)
                 with gr.Column(scale=3):
                     t_comp = gr.Textbox(label=f"세그먼트 {i+1}", lines=2, interactive=True)
                 with gr.Column(scale=1, min_width=110):

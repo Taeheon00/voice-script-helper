@@ -39,7 +39,7 @@ except ImportError as e:
 
 AUDIO_DIR = Path("audio")
 AUTO_REC_DIR = AUDIO_DIR / "auto_recorded_audio"
-AUTO_UVR5_DIR = AUTO_REC_DIR / "uvr5"
+# AUTO_UVR5_DIR 상수는 상위 폴더 생성을 유발할 수 있으므로 파일 기준 경로로 대체하거나 주석 처리합니다.
 MANUAL_UVR5_DIR = AUDIO_DIR / "uvr5"
 SEGMENTS_BASE_DIR = Path("segments_base")
 ASR_DIR = Path("asr_output")
@@ -71,7 +71,6 @@ def ensure_directories():
         AUDIO_DIR,
         MANUAL_UVR5_DIR,
         AUTO_REC_DIR,
-        AUTO_UVR5_DIR,
         SEGMENTS_BASE_DIR,
         ASR_DIR,
         POST_DIR,
@@ -176,9 +175,9 @@ def apply_uvr5_vocal_extraction(input_audio_path):
         log_info(MODULE_NAME, err_msg)
         raise RuntimeError(err_msg)
 
-    ensure_directories()
     abs_input_path = Path(input_audio_path).resolve()
     
+    # [수정] 상위 폴더나 기본 경로 참조를 없애고, 파일이 속한 부모 폴더 내부에만 uvr5를 생성하도록 고정
     if AUTO_REC_DIR.resolve() in abs_input_path.parents:
         target_uvr5_dir = abs_input_path.parent / "uvr5"
     else:
@@ -336,7 +335,12 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         total_files = len(sub_wavs)
         file_audio_cache = []
 
-        target_uvr5_dir = AUTO_REC_DIR / target_folder_name / "uvr5" if target_folder_name else AUTO_UVR5_DIR
+        # [수정] 일괄 분석 시 첫 번째 파일을 기준으로 대상 폴더 하위 uvr5 경로를 명확히 지정
+        if sub_wavs:
+            target_uvr5_dir = Path(sub_wavs[0]).parent / "uvr5"
+        else:
+            target_uvr5_dir = AUTO_REC_DIR / target_folder_name / "uvr5" if target_folder_name else MANUAL_UVR5_DIR
+            
         target_uvr5_dir.mkdir(parents=True, exist_ok=True)
 
         all_vocals_exist = True
