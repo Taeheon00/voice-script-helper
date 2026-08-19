@@ -39,7 +39,6 @@ except ImportError as e:
 
 AUDIO_DIR = Path("audio")
 AUTO_REC_DIR = AUDIO_DIR / "auto_recorded_audio"
-# AUTO_UVR5_DIR 상수는 상위 폴더 생성을 유발할 수 있으므로 파일 기준 경로로 대체하거나 주석 처리합니다.
 MANUAL_UVR5_DIR = AUDIO_DIR / "uvr5"
 SEGMENTS_BASE_DIR = Path("segments_base")
 ASR_DIR = Path("asr_output")
@@ -177,7 +176,6 @@ def apply_uvr5_vocal_extraction(input_audio_path):
 
     abs_input_path = Path(input_audio_path).resolve()
     
-    # [수정] 상위 폴더나 기본 경로 참조를 없애고, 파일이 속한 부모 폴더 내부에만 uvr5를 생성하도록 고정
     if AUTO_REC_DIR.resolve() in abs_input_path.parents:
         target_uvr5_dir = abs_input_path.parent / "uvr5"
     else:
@@ -298,9 +296,8 @@ def print_clean_stage_progress(current_item, total_items, start_time):
     eta_str = format_mmss(eta)
 
     terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-    time_info = f" {elapsed_str} < {eta_str}"
-    prefix = f"  {percent:3d}% |"
-    suffix = f"|{time_info}"
+    prefix = f"{percent:3d}% |"
+    suffix = f"| {current_item}/{total_items} {elapsed_str}<{eta_str}"
     
     fixed_width = len(prefix) + len(suffix)
     bar_len = max(10, terminal_width - fixed_width - 2)
@@ -310,10 +307,12 @@ def print_clean_stage_progress(current_item, total_items, start_time):
     empty_len = bar_len - filled_len
     
     bar_str = "█" * filled_len + " " * empty_len
-    sys.stdout.write("\r" + prefix + bar_str + suffix)
-    sys.stdout.flush()
+
     if current_item >= total_items:
-        sys.stdout.write("\n")
+        sys.stdout.write("\r" + prefix + bar_str + suffix + "\n")
+        sys.stdout.flush()
+    else:
+        sys.stdout.write("\r" + prefix + bar_str + suffix)
         sys.stdout.flush()
 
 def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, analysis_mode=0, target_folder_name=""):
@@ -335,7 +334,6 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         total_files = len(sub_wavs)
         file_audio_cache = []
 
-        # [수정] 일괄 분석 시 첫 번째 파일을 기준으로 대상 폴더 하위 uvr5 경로를 명확히 지정
         if sub_wavs:
             target_uvr5_dir = Path(sub_wavs[0]).parent / "uvr5"
         else:
@@ -354,14 +352,21 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         if all_vocals_exist and total_files > 0:
             print(f"\n[알림] UVR5 파일이 존재하여 스킵합니다.")
         else:
-            print(f"\nUVR5 보컬 분리 수행 중 (총 {total_files}개 파일)")
+            log_info(MODULE_NAME, f"UVR5 보컬 분리 시작 (총 {total_files}개 파일)")
             stage1_start = time.time()
+            
             for idx, file_path in enumerate(sub_wavs, 1):
-                print_clean_stage_progress(idx, total_files, stage1_start)
+                file_name = Path(file_path).name
+                print(f"\n[시작] UVR5 보컬 분리 수행 중: {file_name} ({idx}/{total_files})")
+                
                 try:
                     apply_uvr5_vocal_extraction(file_path)
+                    print(f"[완료] UVR5 보컬 분리 완료: {file_name}")
                 except Exception as e:
-                    log_error(MODULE_NAME, f"특정 파일 UVR5 처리 중 예외 발생 ({Path(file_path).name})", e)
+                    log_error(MODULE_NAME, f"특정 파일 UVR5 처리 중 예외 발생 ({file_name})", e)
+                    print(f"[실패] UVR5 보컬 분리 중 오류 발생: {file_name}")
+            
+            log_info(MODULE_NAME, f"UVR5 보컬 분리 통합 완료 (총 {total_files}개 파일, 소요 시간: {format_time(time.time() - stage1_start)})")
 
         for file_path in sub_wavs:
             file_path_obj = Path(file_path)
@@ -578,10 +583,10 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
             print("\n[알림] UVR5 파일이 존재하여 스킵합니다.")
             processed_vocal_path = str(expected_vocal_path)
         else:
-            print(f"\nUVR5 보컬 분리 수행 중")
+            print(f"\n[시작] 단일 파일 UVR5 보컬 분리 수행 중: {Path(file_path).name}")
             stage1_start = time.time()
-            print_clean_stage_progress(1, 1, stage1_start)
             processed_vocal_path = apply_uvr5_vocal_extraction(file_path)
+            print(f"[완료] UVR5 보컬 분리 완료 (소요 시간: {format_time(time.time() - stage1_start)})")
         
         vocal_audio_data, sr = sf.read(str(processed_vocal_path))
         if vocal_audio_data.ndim > 1:
