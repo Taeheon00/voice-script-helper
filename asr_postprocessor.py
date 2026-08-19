@@ -1,7 +1,6 @@
 import re
 import torch
 
-# [고급 패키지] 한국어 문장 경계 및 형태소 분석을 위한 Kiwipiepy
 try:
     from kiwipiepy import Kiwi
     kiwi = Kiwi()
@@ -20,7 +19,7 @@ if kiwi is None:
 def normalize_korean_numbers_strict(text):
     """
     [백업 모듈] 엄격한 단위 기반 한국어 숫자 정규화 규칙
-    - 일상어 오변환을 막기 위해 '월', '일', '원', '조', '억', '만' 등 명확한 단위가 붙은 경우에만 작동합니다.
+    - 일상어 오변환을 막기 위해 '월', '일', '원', '인', '조', '억', '만' 등 명확한 단위가 붙은 경우에만 작동합니다.
     """
     if not text:
         return text
@@ -49,11 +48,17 @@ def normalize_korean_numbers_strict(text):
 
     text = re.sub(r'([일이삼사오육칠팔구십]+)\s*월', replace_month, text)
 
-    # 2. 날짜('일') 및 화폐('원') 등 명확한 단위가 결합된 수사 변환
+    # 2. 날짜('일') 및 화폐('원'), 인원('인') 등 명확한 단위가 결합된 수사 변환
     def replace_day_or_unit(match):
         full_match_str = match.group(0)
-        kor_part = match.group(1)   
-        suffix = match.group(2)   
+        
+        # [방어 로직 추가] '구인', '구직', '구인구직' 등 (띄어쓰기 포함)은 숫자로 변환하지 않고 그대로 유지
+        cleaned_check = re.sub(r'\s+', '', full_match_str)
+        if "구인" in cleaned_check or "구직" in cleaned_check:
+            return full_match_str
+            
+        kor_part = match.group(1)    
+        suffix = match.group(2)    
         
         try:
             val = 0
@@ -72,7 +77,8 @@ def normalize_korean_numbers_strict(text):
         except Exception as e:
             return full_match_str
 
-    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원)'
+    # [수정] '일' 단위 패턴에 '인' 추가 및 띄어쓰기 호환 허용
+    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원|인)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
     # 3. '1조 5천억' 같은 대규모 단위 혼합 변환 (조, 억, 만 단위 포함 패턴)
@@ -190,7 +196,7 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
                     vad_parameters=dict(
                         threshold=0.35,            
                         min_silence_duration_ms=250,  
-                        speech_pad_ms=100           
+                        speech_pad_ms=100            
                     ),
                     without_timestamps=False
                 )
