@@ -78,7 +78,7 @@ def normalize_korean_numbers_strict(text):
             return full_match_str
 
     # [수정] '일' 단위 패턴에 '인' 추가 및 띄어쓰기 호환 허용
-    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원|인)'
+    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원|인|구매)(?=[가-힣]|\s|$)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
     # 3. '1조 5천억' 같은 대규모 단위 혼합 변환 (조, 억, 만 단위 포함 패턴)
