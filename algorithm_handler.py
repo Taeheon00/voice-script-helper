@@ -274,3 +274,62 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
         register_or_update_algorithm(algo_name, wav_path, corrected_text, raw_stt_text=raw_stt_text)
         
     return True
+
+def register_dataset_from_refined_folder_with_path(algo_name, folder_path):
+    """
+    기존 register_dataset_from_refined_folder를 수행한 뒤, 
+    해당 알고리즘 JSON에 사용된 세그먼트 폴더 경로(source_folder)를 추가로 기록합니다.
+    """
+    success = register_dataset_from_refined_folder(algo_name, folder_path)
+    if success:
+        file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    algo_data = json.load(f)
+                
+                # 사용된 세그먼트 폴더 경로를 절대 경로 또는 상대 경로 형태로 기록
+                algo_data["source_folder"] = str(folder_path)
+                
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(algo_data, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                log_error(MODULE_NAME, f"세그먼트 폴더 경로 기록 중 예외 발생 ({algo_name})", e)
+    return success
+
+def get_chatbot_texts_from_source_folder(algo_name):
+    """
+    알고리즘 JSON에 기록된 세그먼트 폴더 경로를 찾아가,
+    수정되지 않은 내용을 포함하여 폴더 내의 모든 .txt 파일(전체 내용)을 읽어와 반환합니다.
+    """
+    file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
+    texts = []
+    
+    if not os.path.exists(file_path):
+        return texts
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            algo_data = json.load(f)
+            
+        source_folder = algo_data.get("source_folder")
+        if not source_folder or not os.path.exists(source_folder):
+            log_info(MODULE_NAME, f"기록된 세그먼트 폴더를 찾을 수 없습니다 ({algo_name})")
+            return texts
+
+        # 세그먼트 폴더 안의 모든 .txt 파일들을 직접 읽어옴
+        for file_name in os.listdir(source_folder):
+            if file_name.endswith(".txt"):
+                txt_file_path = os.path.join(source_folder, file_name)
+                try:
+                    with open(txt_file_path, "r", encoding="utf-8") as tf:
+                        content = tf.read().strip()
+                        if content:
+                            texts.append(content)
+                except Exception as e:
+                    log_error(MODULE_NAME, f"세그먼트 텍스트 파일 읽기 실패 ({txt_file_path})", e)
+                    
+    except Exception as e:
+        log_error(MODULE_NAME, f"세그먼트 폴더 기반 텍스트 추출 중 예외 발생 ({algo_name})", e)
+        
+    return texts

@@ -4,6 +4,7 @@ import json
 import ui_studio as us
 import rec
 import audio_processor as ap
+import chatbot as cb  # 챗봇 모듈 연동
 
 # 공통 에러 로거 연동 (단일화)
 from error_logger import log_error, log_info
@@ -156,6 +157,34 @@ def handle_audio_selection(model):
     except Exception as e:
         log_error(MODULE_NAME, "handle_audio_selection 함수 실행 중 치명적 예외 발생", e, debug=True)
 
+def handle_chatbot_execution():
+    """메인 메뉴 4번 챗봇 실행 연동 함수"""
+    try:
+        # 1. 챗봇 인물 설정 메뉴 호출 (등록된 알고리즘이 없으면 안내 후 메인 메뉴 복귀)[cite: 10]
+        selected_persona = cb.chatbot_persona_menu()
+        if not selected_persona:
+            return
+            
+        # 2. 선택된 화자로 챗봇 인스턴스 생성[cite: 10]
+        bot = cb.LocalPersonaChatbot(target_persona=selected_persona)
+        
+        print(f"\n🎭 '{selected_persona}' 페르소나 챗봇 대화가 시작되었습니다! (종료하려면 'exit' 입력)")
+        print("------------------------------------------------------------------")
+
+        while True:
+            user_input = input("\n사용자: ")
+            if user_input.lower() == "exit":
+                log_info(MODULE_NAME, f"'{selected_persona}'와의 대화 종료 및 메뉴 복귀")
+                print(f"\n[알림] '{selected_persona}'와의 대화를 종료하고 메뉴로 돌아갑니다.")
+                break
+
+            reply = bot.generate_response(user_input)
+            print(f"{selected_persona}: {reply}")
+            
+    except Exception as e:
+        log_error(MODULE_NAME, "챗봇 실행 중 예외 발생", e, debug=True)
+        print("[오류] 챗봇을 구동하는 중 문제가 발생했습니다. 에러 로그를 확인해주세요.")
+
 def main():
     try:
         # 1. 환경 설정 초기화 (가장 먼저 수행하여 하위 모듈들이 참조 가능하게 함)
@@ -173,6 +202,11 @@ def main():
         ap.ensure_directories()
     except Exception as e:
         log_error(MODULE_NAME, "ap.ensure_directories 실행 실패", e)
+
+    try:
+        cb.ensure_directories()
+    except Exception as e:
+        log_error(MODULE_NAME, "cb.ensure_directories 실행 실패", e)
         
     model = None
     
@@ -184,7 +218,8 @@ def main():
         print(" 1. 실시간 녹화/자동녹화")
         print(" 2. 저장 된 오디오 분석")
         print(" 3. STT편집/알고리즘 등록 (WebUI스튜디오)")
-        print(" 4. 프로그램 종료")
+        print(" 4. 챗봇 실행")
+        print(" 5. 프로그램 종료")
         print("============================================== ")
         
         try:
@@ -214,6 +249,11 @@ def main():
             except Exception as e:
                 log_error(MODULE_NAME, "웹 UI 스튜디오 실행 중 예외 발생", e)
         elif choice == "4":
+            try:
+                handle_chatbot_execution()
+            except Exception as e:
+                log_error(MODULE_NAME, "챗봇 실행 메뉴 진입 중 예외 발생", e)
+        elif choice == "5":
             print("[안내] 프로그램을 종료합니다.")
             log_info(MODULE_NAME, "프로그램 정상 종료")
             sys.exit(0)
