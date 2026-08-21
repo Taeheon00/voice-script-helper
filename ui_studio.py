@@ -776,7 +776,12 @@ def run_data_refinement_webui():
                 msg = "[오류] 로드된 데이터가 없습니다."
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
                 return msg
-            new_items, _, _, save_msg, _, _, _, _, _, _, _, _, _ = save_all_changes(items, history, redo, page_num, *args)
+            
+            # save_all_changes 반환값의 언패킹 개수 불일치 방지를 위해 튜플 인덱스로 안전하게 접근하도록 수정
+            save_result = save_all_changes(items, history, redo, page_num, *args)
+            new_items = save_result[0]
+            save_msg = save_result[3]
+            
             if "[오류]" in save_msg:
                 log_error(MODULE_NAME, f"알고리즘 등록 전 저장 실패: {save_msg}", ValueError(save_msg))
                 return f"등록 실패: {save_msg}"

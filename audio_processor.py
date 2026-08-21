@@ -219,7 +219,7 @@ def apply_uvr5_vocal_extraction(input_audio_path):
         log_error(MODULE_NAME, f"UVR5 보컬 분리 프로세스 중 예외 발생 ({base_name})", e)
         raise
 
-def configure_strict_analysis_pipeline(audio_data, sample_rate):
+def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
     while True:
         print("\n================================================")
         print("                분석 모드 선택")
@@ -244,32 +244,45 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate):
         except Exception:
             existing = []
             
-        if mode == "1":
-            if not existing:
-                print("[알림] 등록된 프로파일이 없습니다.")
-                continue
-            try:
-                matched_speakers = [algo_name for algo_name in existing if ah.verify_single_speaker(algo_name, audio_data)]
-            except Exception:
-                matched_speakers = []
+        if not existing:
+            print("[알림] 등록된 알고리즘(프로파일)이 존재하지 않습니다.")
+            continue
 
-            if not matched_speakers:
-                print("[차단] 일치하는 화자 프로파일이 없습니다.")
+        if mode == "1":
+            passed_algorithms = []
+            for algo_name in existing:
+                try:
+                    # [수정됨] 알고리즘 전체 평균 피치와 현재 오디오 전체의 평균 피치를 직접 대조
+                    is_passed = ah.verify_single_speaker(algo_name, str(file_path)) if file_path and hasattr(ah, "verify_single_speaker") else False
+                except Exception:
+                    is_passed = False
+                
+                if is_passed:
+                    passed_algorithms.append(algo_name)
+
+            if not passed_algorithms:
+                print("[차단] 등록된 모든 알고리즘 중 현재 오디오 전체의 평균 피치와 일치하는 항목이 없어 분석을 진행할 수 없습니다.")
                 continue
-            return [matched_speakers[0]], True, 1
+                
+            print(f"[통과] 단일 화자 피치 검증 성공 (매칭된 알고리즘: {', '.join(passed_algorithms)})")
+            return passed_algorithms, True, 1
             
         elif mode == "2":
-            if not existing:
-                print("[알림] 등록된 프로파일이 없습니다.")
-                continue
             try:
-                success, msg = ah.verify_multi_speakers_auto(audio_data)
+                target_path = str(file_path) if file_path else None
+                if hasattr(ah, "verify_multi_speakers_auto"):
+                    # [수정됨] 다중 화자 음원 전체에서 35% 이상 분포 일치 여부 검증 호출
+                    success, msg = ah.verify_multi_speakers_auto(target_path)
+                else:
+                    success, msg = False, "함수가 존재하지 않습니다."
             except Exception as e:
                 success, msg = False, str(e)
 
             if not success:
-                print(f"[차단] {msg}")
+                print(f"[차단] 다중 화자 검증 실패: {msg}")
                 continue
+                
+            print(f"[통과] 다중 화자 검증 성공: {msg}")
             return existing, False, 2
         else:
             print("[오류] 올바른 번호를 입력해주세요.")
@@ -394,7 +407,7 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
             print_clean_stage_progress(f_idx, total_files, stage2_start)
 
             raw_speaker_turns = []
-            if HAS_PYANNOTE and not is_single:
+            if HAS_PYANNOTE:
                 token = get_huggingface_token()
                 if token:
                     try:
@@ -421,11 +434,21 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
 
         speaker_mapping = {}
         unique_orig_speakers = sorted({s for _, _, s in batch_speaker_turns})
-        for idx_s, orig_s in enumerate(unique_orig_speakers):
-            if active_speakers and len(active_speakers) > 1:
-                speaker_mapping[orig_s] = active_speakers[idx_s] if idx_s < len(active_speakers) else orig_s
+        
+        for orig_s in unique_orig_speakers:
+            matched_name = None
+            if hasattr(ah, "match_speaker_by_profile_features"):
+                try:
+                    matched_name = ah.match_speaker_by_profile_features(orig_s, active_speakers)
+                except Exception:
+                    pass
+            
+            if matched_name:
+                speaker_mapping[orig_s] = matched_name
             elif active_speakers and len(active_speakers) == 1:
                 speaker_mapping[orig_s] = active_speakers[0]
+            elif active_speakers and len(active_speakers) > 1:
+                speaker_mapping[orig_s] = active_speakers[min(unique_orig_speakers.index(orig_s), len(active_speakers)-1)]
             else:
                 speaker_mapping[orig_s] = orig_s
 
@@ -439,7 +462,7 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         for idx, (start, end, orig_speaker) in enumerate(batch_speaker_turns, 1):
             print_clean_stage_progress(idx, total_turns, stage3_start)
 
-            mapped_speaker = speaker_mapping.get(orig_speaker, "SPEAKER_00")
+            mapped_speaker = speaker_mapping.get(orig_speaker, orig_speaker)
             start_sample = int(start * TARGET_SAMPLE_RATE)
             end_sample = int(end * TARGET_SAMPLE_RATE)
             chunk_audio = full_vocal_audio_data[start_sample:end_sample]
@@ -516,7 +539,6 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
             post_file_path = POST_DIR / f"{target_folder_name}_post_{p_idx:03d}.txt"
             p_idx += 1
             
-        # [수정] ASR 파일명 덮어쓰기 방지를 위한 번호 증가 루프 추가
         a_idx = 1
         while asr_file_path.exists():
             asr_file_path = ASR_DIR / f"{target_folder_name}_asr_{a_idx:03d}.txt"
@@ -548,8 +570,6 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
 
                 log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
                 post_file_obj.write(log_line + "\n")
-                
-                # [수정] ASR 전용 파일에는 화자/시간 정보 없이 순수 텍스트만 누적 저장
                 asr_file_obj.write(seg['text'] + " ")
 
         log_info(MODULE_NAME, f"통합 분석 완료! 유효 세그먼트: {saved_segment_count}개")
@@ -609,7 +629,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         print_clean_stage_progress(1, 1, stage2_start)
         raw_speaker_turns = []
         
-        if HAS_PYANNOTE and not is_single:
+        if HAS_PYANNOTE:
             token = get_huggingface_token()
             if token:
                 try:
@@ -633,11 +653,21 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
 
         speaker_mapping = {}
         unique_orig_speakers = sorted({s for _, _, s in raw_speaker_turns})
-        for idx, orig_s in enumerate(unique_orig_speakers):
-            if active_speakers and len(active_speakers) > 1:
-                speaker_mapping[orig_s] = active_speakers[idx] if idx < len(active_speakers) else orig_s
+        
+        for orig_s in unique_orig_speakers:
+            matched_name = None
+            if hasattr(ah, "match_speaker_by_profile_features"):
+                try:
+                    matched_name = ah.match_speaker_by_profile_features(orig_s, active_speakers)
+                except Exception:
+                    pass
+            
+            if matched_name:
+                speaker_mapping[orig_s] = matched_name
             elif active_speakers and len(active_speakers) == 1:
                 speaker_mapping[orig_s] = active_speakers[0]
+            elif active_speakers and len(active_speakers) > 1:
+                speaker_mapping[orig_s] = active_speakers[min(unique_orig_speakers.index(orig_s), len(active_speakers)-1)]
             else:
                 speaker_mapping[orig_s] = orig_s
 
@@ -650,7 +680,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         for idx, (start, end, orig_speaker) in enumerate(raw_speaker_turns, 1):
             print_clean_stage_progress(idx, total_turns, stage3_start)
 
-            mapped_speaker = speaker_mapping.get(orig_speaker, "SPEAKER_00")
+            mapped_speaker = speaker_mapping.get(orig_speaker, orig_speaker)
             start_sample = int(start * TARGET_SAMPLE_RATE)
             end_sample = int(end * TARGET_SAMPLE_RATE)
             chunk_audio = vocal_audio_data[start_sample:end_sample]
@@ -718,7 +748,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         
         post_file_path = POST_DIR / f"{clean_source_name}_post_{len(list(POST_DIR.glob(f'{clean_source_name}_post_*.txt'))) + 1:03d}.txt"
         
-        # [수정] 단일 파일 처리 시에도 ASR 파일 이름 덮어씌기 방지 로직 적용
         asr_file_path = ASR_DIR / f"{clean_source_name}_asr_001.txt"
         a_idx = 1
         while asr_file_path.exists():
@@ -751,8 +780,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
 
                 log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
                 post_file_obj.write(log_line + "\n")
-                
-                # [수정] ASR 전용 파일에는 화자/시간 정보 없이 순수 텍스트만 누적 저장
                 asr_file_obj.write(seg['text'] + " ")
 
         print(f"\n[알림] 저장이 완료되었습니다. {specific_segment_dir}")
@@ -781,7 +808,9 @@ def select_and_process_audio_file(model=None):
             sample_audio_data = sample_audio_data.astype(np.float32)
             sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
                 
-            active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+            active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(
+                sample_audio_data, TARGET_SAMPLE_RATE, file_path=target_file
+            )
             if active_speakers is not None or analysis_mode != 3:
                 execute_analysis_flow(current_model, str(target_file), active_speakers, is_single, analysis_mode)
             else:
@@ -884,7 +913,9 @@ def select_and_process_audio_file(model=None):
                     sample_audio_data = sample_audio_data.astype(np.float32)
                     sample_audio_data = resample_audio(sample_audio_data, sr, TARGET_SAMPLE_RATE)
                         
-                    active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(sample_audio_data, TARGET_SAMPLE_RATE)
+                    active_speakers, is_single, analysis_mode = configure_strict_analysis_pipeline(
+                        sample_audio_data, TARGET_SAMPLE_RATE, file_path=sub_wavs[0]
+                    )
                     if active_speakers is None and analysis_mode == 3:
                         print("[알림] 분석이 취소되었습니다.")
                         return

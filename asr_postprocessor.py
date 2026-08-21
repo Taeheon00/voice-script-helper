@@ -1,5 +1,6 @@
 import re
 import torch
+import numpy as np
 
 try:
     from kiwipiepy import Kiwi
@@ -17,10 +18,6 @@ if kiwi is None:
 
 
 def normalize_korean_numbers_strict(text):
-    """
-    [백업 모듈] 엄격한 단위 기반 한국어 숫자 정규화 규칙
-    - '~인데' 등의 조사와 엮여 숫자로 잘못 바뀌는 현상을 방지하고, '일인분' 등의 표현을 숫자로 정규화합니다.
-    """
     if not text:
         return text
 
@@ -32,7 +29,7 @@ def normalize_korean_numbers_strict(text):
         '백': '100', '천': '1000'
     }
 
-    # 1. '월' 단위 표현 변환 (예: 이월, 삼월 -> 2월, 3월)[cite: 1, 2, 3, 5, 6, 7]
+    # 1. '월' 단위 표현 변환 (예: 이월, 삼월 -> 2월, 3월)
     def replace_month(match):
         kor_num = match.group(1)
         val = 0
@@ -50,7 +47,6 @@ def normalize_korean_numbers_strict(text):
 
     text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*월', replace_month, text)
 
-    # [추가 기능] '일인분', '이인분', '삼인분' 등의 표현을 '1인분', '2인분' 등으로 변환하는 규칙
     def replace_portion(match):
         kor_num = match.group(1)
         try:
@@ -61,9 +57,46 @@ def normalize_korean_numbers_strict(text):
 
     text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*인분', replace_portion, text)
 
-    # 2. 날짜('일', '일부터', '일까지' 등) 및 화폐('원'), 인원('인'), 수량('종', '개') 등 변환[cite: 1, 2, 3, 5, 6, 7]
-    def replace_day_or_unit(match):
+    def replace_decade(match):
+        kor_part = match.group(1)
+        try:
+            val = 0
+            if '십' in kor_part:
+                parts = kor_part.split('십')
+                tens_part = parts[0]
+                units_part = parts[1] if len(parts) > 1 else ""
+                
+                tens = int(kor_to_num_map.get(tens_part, 1)) * 10 if tens_part else 10
+                units = int(kor_to_num_map.get(units_part, 0)) if units_part else 0
+                val = tens + units
+            else:
+                val = int(kor_to_num_map.get(kor_part, kor_part))
+            
+            return f"{val}대"
+        except Exception:
+            return match.group(0)
 
+    text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*대(?=[가-힣]|\s|,|\.|$)', replace_decade, text)
+
+    def replace_general_compound_number(match):
+        kor_part = match.group(0)
+        try:
+            if '십' in kor_part:
+                parts = kor_part.split('십')
+                tens_part = parts[0]
+                units_part = parts[1] if len(parts) > 1 else ""
+                
+                tens = int(kor_to_num_map.get(tens_part, 1)) * 10 if tens_part else 10
+                units = int(kor_to_num_map.get(units_part, 0)) if units_part else 0
+                return str(tens + units)
+            else:
+                return kor_to_num_map.get(kor_part, kor_part)
+        except Exception:
+            return kor_part
+
+    text = re.sub(r'(?<![가-힣])([이삼사오육칠팔구]십[일이삼사오육칠팔구]?)(?![가-힣]|\s*(월|인분|대))', replace_general_compound_number, text)
+
+    def replace_day_or_unit(match):
         kor_part = match.group(1)    
         suffix = match.group(2)    
         
@@ -84,11 +117,9 @@ def normalize_korean_numbers_strict(text):
         except Exception:
             return match.group(0)
 
-    # '일부터', '일까지', '이종', '인' 등을 포괄하는 단위 변환 패턴[cite: 1, 2, 3, 5, 6, 7]
-    pattern_unit = r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*(일부터|일까지|일도|일에|일|원|인|종|개|구매)(?=[가-힣]|\s|,|\.|$)'
+    pattern_unit = r'(?<![가-힣])(?!사\s*인)([일이삼사오육칠팔구십]+)\s*(일부터|일까지|일도|일에|일|원|인|종|개|구매|시|분|초)(?=[가-힣]|\s|,|\.|$)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
-    # 3. '1조 5천억' 같은 대규모 단위 혼합 변환[cite: 1, 2, 3, 5, 6, 7]
     def replace_large_num(match):
         chunk = match.group(0)
         if not any(unit in chunk for unit in ['조', '억', '만', '천', '백']):
@@ -105,9 +136,6 @@ def normalize_korean_numbers_strict(text):
 
 
 def clean_text_advanced(text):
-    """
-    외국어 환각 및 노이즈 성향 감지 시 비어 있는 텍스트("") 상태로 반환[cite: 1, 2, 3, 5, 6, 7]
-    """
     if not text:
         return ""
     
@@ -115,8 +143,6 @@ def clean_text_advanced(text):
         return ""
         
     cleaned = text.strip()
-    
-    # 수동 숫자 변환 규칙 적용[cite: 1, 2, 3, 5, 6, 7]
     cleaned = normalize_korean_numbers_strict(cleaned)
     
     if re.search(r"([ㄱ-ㅎㅏ-ㅣ])\1{4,}", cleaned):
@@ -132,10 +158,20 @@ def clean_text_advanced(text):
     return cleaned
 
 
+def apply_algorithm_text_correction(text, mapped_speaker):
+    if not text:
+        return text
+    try:
+        import algorithm_handler as ah
+        if mapped_speaker and hasattr(ah, "apply_text_corrections"):
+            return ah.apply_text_corrections(text, mapped_speaker)
+    except Exception:
+        pass
+    return text
+
+
+# [핵심] 기존 상위 호출부가 완벽하게 인식하는 원래의 인자 구조 복원
 def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mapped_speaker=None):
-    """
-    [통합 후처리 진입점] 세그먼트 단위 ASR 텍스트 후처리[cite: 1, 2, 3, 5, 6, 7]
-    """
     try:
         if not chunk_text:
             return ""
@@ -147,6 +183,10 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         raw_text = re.sub(r"\s+", " ", cleaned).strip()
         if not raw_text:
             return ""
+
+        # 전달된 화자 알고리즘 규칙 적용
+        if mapped_speaker:
+            raw_text = apply_algorithm_text_correction(raw_text, mapped_speaker)
 
         if len(raw_text) < 2 and not re.search(r'[0-9]', raw_text):
             return ""
@@ -173,9 +213,6 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
 
 
 def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
-    """
-    [정석적인 고도화 스트림 처리 루프][cite: 1, 2, 3, 5, 6, 7]
-    """
     if model is None or vocal_audio_data is None or vocal_audio_data.size == 0:
         log_error(MODULE_NAME, "전역 ASR 패스 실패: 모델이 없거나 오디오 데이터가 비어 있습니다.", ValueError("Invalid model or audio data"))
         return ""
