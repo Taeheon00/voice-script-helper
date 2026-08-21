@@ -515,6 +515,8 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         while post_file_path.exists():
             post_file_path = POST_DIR / f"{target_folder_name}_post_{p_idx:03d}.txt"
             p_idx += 1
+            
+        # [수정] ASR 파일명 덮어쓰기 방지를 위한 번호 증가 루프 추가
         a_idx = 1
         while asr_file_path.exists():
             asr_file_path = ASR_DIR / f"{target_folder_name}_asr_{a_idx:03d}.txt"
@@ -546,7 +548,9 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
 
                 log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
                 post_file_obj.write(log_line + "\n")
-                asr_file_obj.write(log_line + "\n")
+                
+                # [수정] ASR 전용 파일에는 화자/시간 정보 없이 순수 텍스트만 누적 저장
+                asr_file_obj.write(seg['text'] + " ")
 
         log_info(MODULE_NAME, f"통합 분석 완료! 유효 세그먼트: {saved_segment_count}개")
         print(f"\n[알림] 저장이 완료되었습니다. {specific_segment_dir}")
@@ -713,7 +717,13 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         ASR_DIR.mkdir(exist_ok=True)
         
         post_file_path = POST_DIR / f"{clean_source_name}_post_{len(list(POST_DIR.glob(f'{clean_source_name}_post_*.txt'))) + 1:03d}.txt"
-        asr_file_path = ASR_DIR / f"{clean_source_name}_asr_{len(list(ASR_DIR.glob(f'{clean_source_name}_asr_*.txt'))) + 1:03d}.txt"
+        
+        # [수정] 단일 파일 처리 시에도 ASR 파일 이름 덮어씌기 방지 로직 적용
+        asr_file_path = ASR_DIR / f"{clean_source_name}_asr_001.txt"
+        a_idx = 1
+        while asr_file_path.exists():
+            asr_file_path = ASR_DIR / f"{clean_source_name}_asr_{a_idx:03d}.txt"
+            a_idx += 1
 
         stage4_start = time.time()
         saved_segment_count = 0
@@ -741,7 +751,9 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
 
                 log_line = f"[{seg['speaker']}] ({format_time(seg['start'])} ~ {format_time(seg['end'])}): {seg['text']}"
                 post_file_obj.write(log_line + "\n")
-                asr_file_obj.write(log_line + "\n")
+                
+                # [수정] ASR 전용 파일에는 화자/시간 정보 없이 순수 텍스트만 누적 저장
+                asr_file_obj.write(seg['text'] + " ")
 
         print(f"\n[알림] 저장이 완료되었습니다. {specific_segment_dir}")
         log_info(MODULE_NAME, f"분석 완료! 유효 세그먼트: {saved_segment_count}개")

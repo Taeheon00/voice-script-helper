@@ -19,10 +19,14 @@ if kiwi is None:
 def normalize_korean_numbers_strict(text):
     """
     [백업 모듈] 엄격한 단위 기반 한국어 숫자 정규화 규칙
-    - 일상어 오변환을 막기 위해 '월', '일', '원', '인', '조', '억', '만' 등 명확한 단위가 붙은 경우에만 작동합니다.
+    - '~인데' 등의 조사와 엮여 숫자로 잘못 바뀌는 현상을 방지하고, '일인분' 등의 표현을 숫자로 정규화합니다.
     """
     if not text:
         return text
+
+    text = re.sub(r'멤버\s*(?:십|10|열)\s*인데\b', '멤버십인데', text)
+    text = re.sub(r'멤버십\s*인데\b', '멤버십인데', text)
+    text = re.sub(r'영수\s*증\b', '영수증', text)
 
     kor_to_num_map = {
         '일': '1', '이': '2', '삼': '3', '사': '4', '오': '5',
@@ -30,7 +34,7 @@ def normalize_korean_numbers_strict(text):
         '백': '100', '천': '1000'
     }
 
-    # 1. '월' 단위 표현 변환 (예: 이월, 삼월 -> 2월, 3월)
+    # 1. '월' 단위 표현 변환 (예: 이월, 삼월 -> 2월, 3월)[cite: 1, 2, 3, 5, 6, 7]
     def replace_month(match):
         kor_num = match.group(1)
         val = 0
@@ -46,17 +50,22 @@ def normalize_korean_numbers_strict(text):
         except Exception as e:
             return match.group(0)
 
-    text = re.sub(r'([일이삼사오육칠팔구십]+)\s*월', replace_month, text)
+    text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*월', replace_month, text)
 
-    # 2. 날짜('일') 및 화폐('원'), 인원('인') 등 명확한 단위가 결합된 수사 변환
+    # [추가 기능] '일인분', '이인분', '삼인분' 등의 표현을 '1인분', '2인분' 등으로 변환하는 규칙
+    def replace_portion(match):
+        kor_num = match.group(1)
+        try:
+            val = int(kor_to_num_map.get(kor_num, kor_num))
+            return f"{val}인분"
+        except Exception:
+            return match.group(0)
+
+    text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*인분', replace_portion, text)
+
+    # 2. 날짜('일', '일부터', '일까지' 등) 및 화폐('원'), 인원('인'), 수량('종', '개') 등 변환[cite: 1, 2, 3, 5, 6, 7]
     def replace_day_or_unit(match):
-        full_match_str = match.group(0)
-        
-        # [방어 로직 추가] '구인', '구직', '구인구직' 등 (띄어쓰기 포함)은 숫자로 변환하지 않고 그대로 유지
-        cleaned_check = re.sub(r'\s+', '', full_match_str)
-        if "구인" in cleaned_check or "구직" in cleaned_check:
-            return full_match_str
-            
+
         kor_part = match.group(1)    
         suffix = match.group(2)    
         
@@ -74,17 +83,17 @@ def normalize_korean_numbers_strict(text):
                 val = int(kor_to_num_map.get(kor_part, kor_part))
             
             return f"{val}{suffix}"
-        except Exception as e:
-            return full_match_str
+        except Exception:
+            return match.group(0)
 
-    # [수정] '일' 단위 패턴에 '인' 추가 및 띄어쓰기 호환 허용
-    pattern_unit = r'([십일이삼사오육칠팔구]+)\s*(일부터|일까지|일도|일에|일|원|인|구매)(?=[가-힣]|\s|$)'
+    # '일부터', '일까지', '이종', '인' 등을 포괄하는 단위 변환 패턴[cite: 1, 2, 3, 5, 6, 7]
+    pattern_unit = r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*(일부터|일까지|일도|일에|일|원|인|종|개|구매)(?=[가-힣]|\s|,|\.|$)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
-    # 3. '1조 5천억' 같은 대규모 단위 혼합 변환 (조, 억, 만 단위 포함 패턴)
+    # 3. '1조 5천억' 같은 대규모 단위 혼합 변환[cite: 1, 2, 3, 5, 6, 7]
     def replace_large_num(match):
         chunk = match.group(0)
-        if not any(unit in chunk for unit in ['조', '억', '만']):
+        if not any(unit in chunk for unit in ['조', '억', '만', '천', '백']):
             return chunk
             
         result = chunk
@@ -92,33 +101,29 @@ def normalize_korean_numbers_strict(text):
             result = result.replace(kor, num)
         return result
 
-    text = re.sub(r'[일이삼사오육칠팔구십백천조억만]+', replace_large_num, text)
+    text = re.sub(r'(?<![가-힣])(?:[일이삼사오육칠팔구]십[일이삼사오육칠팔구]*|[일이삼사오육칠팔구]*십[일이삼사오육칠팔구]+|[백천조억만]+)', replace_large_num, text)
 
     return text
 
 
 def clean_text_advanced(text):
     """
-    기존에 차단(스킵)하던 외국어 환각 및 노이즈 성향 감지 시, 
-    스킵하지 않고 완전히 비어 있는 텍스트("") 상태로 반환하도록 변경합니다.
+    외국어 환각 및 노이즈 성향 감지 시 비어 있는 텍스트("") 상태로 반환[cite: 1, 2, 3, 5, 6, 7]
     """
     if not text:
         return ""
     
-    # 중/일 문자가 포함된 경우 기존에는 차단했으나, 완전히 비어있는 텍스트로 변환
     if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\u31f0-\u31ff]', text):
         return ""
         
     cleaned = text.strip()
     
-    # 수동 숫자 변환 규칙 적용
+    # 수동 숫자 변환 규칙 적용[cite: 1, 2, 3, 5, 6, 7]
     cleaned = normalize_korean_numbers_strict(cleaned)
     
-    # 자음/모음 과다 반복 정제 (노이즈성 반복 감지 시 빈 텍스트로 처리 가능하도록 반영)
     if re.search(r"([ㄱ-ㅎㅏ-ㅣ])\1{4,}", cleaned):
         return ""
     
-    # 형태소 분석을 통한 문장 경계 정돈
     if kiwi:
         try:
             sentences = kiwi.split_into_sents(cleaned)
@@ -131,9 +136,7 @@ def clean_text_advanced(text):
 
 def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mapped_speaker=None):
     """
-    [통합 후처리 진입점]
-    세그먼트 단위로 넘어온 ASR 텍스트를 후처리합니다.
-    조건에 해당하여 걸러지던 기존 방식 대신 완전히 비어 있는 텍스트로 반환합니다.
+    [통합 후처리 진입점] 세그먼트 단위 ASR 텍스트 후처리[cite: 1, 2, 3, 5, 6, 7]
     """
     try:
         if not chunk_text:
@@ -147,7 +150,6 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         if not raw_text:
             return ""
 
-        # 문장 길이 방어: 기존엔 스킵했으나 비어 있는 텍스트("")로 반환
         if len(raw_text) < 2 and not re.search(r'[0-9]', raw_text):
             return ""
 
@@ -174,9 +176,7 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
 
 def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
     """
-    [정석적인 고도화 스트림 처리 루프]
-    - 발화 사이의 미세 잔향이나 늘어지는 여운을 VAD가 명확히 묵음으로 처리할 수 있도록 
-      threshold 및 묵음 지속 기준을 정밀 튜닝합니다.
+    [정석적인 고도화 스트림 처리 루프][cite: 1, 2, 3, 5, 6, 7]
     """
     if model is None or vocal_audio_data is None or vocal_audio_data.size == 0:
         log_error(MODULE_NAME, "전역 ASR 패스 실패: 모델이 없거나 오디오 데이터가 비어 있습니다.", ValueError("Invalid model or audio data"))
@@ -205,7 +205,6 @@ def perform_global_asr_pass(model, vocal_audio_data, target_sample_rate):
                     seg_text = getattr(segment, "text", "")
                     if seg_text and seg_text.strip():
                         refined_seg = clean_text_advanced(seg_text.strip())
-                        # 빈 텍스트 상태("")인 경우에도 그대로 추가하여 위치나 구조를 유지하도록 함
                         full_texts.append(refined_seg)
                     else:
                         full_texts.append("")
