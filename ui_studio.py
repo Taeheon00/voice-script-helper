@@ -25,7 +25,17 @@ if not hasattr(ah, "merge_audio_segments"):
         return True, "성공", None
     ah.merge_audio_segments = _fallback_merge_audio_segments
 
+def has_wav_files(directory):
+    """해당 디렉토리 내부에 WAV 파일이 존재하는지 확인"""
+    if not os.path.exists(directory):
+        return False
+    try:
+        return any(f.lower().endswith('.wav') for f in os.listdir(directory))
+    except Exception:
+        return False
+
 def get_single_speaker_folders():
+    """단일 화자 분석 폴더(실제 WAV 파일이 있는 폴더) 조회"""
     if not os.path.exists(SEGMENTS_BASE_DIR):
         log_error(MODULE_NAME, f"단일 화자 폴더 탐색 실패: 기본 디렉토리가 존재하지 않습니다 ({SEGMENTS_BASE_DIR})", FileNotFoundError())
         return []
@@ -34,14 +44,18 @@ def get_single_speaker_folders():
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
                 d_lower = d.lower()
-                if d_lower.startswith("seg_single") or "single" in d_lower or "단일" in d or check_custom_single_format(d_lower)[0]:
-                    rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
-                    folders.append(rel_path)
+                # 단일 화자 분석 정의: single_segment 또는 single_auto_recorded 포함
+                if d_lower.startswith("single_segment") or d_lower.startswith("single_auto_recorded"):
+                    target_path = os.path.join(root, d)
+                    if has_wav_files(target_path):
+                        rel_path = os.path.relpath(target_path, SEGMENTS_BASE_DIR)
+                        folders.append(rel_path)
     except Exception as e:
         log_error(MODULE_NAME, "단일 화자 폴더 탐색 중 예외 발생", e)
     return folders
 
 def get_basic_segment_folders():
+    """기본 분석 폴더(실제 WAV 파일이 있는 폴더) 조회"""
     if not os.path.exists(SEGMENTS_BASE_DIR):
         log_error(MODULE_NAME, f"기본 분석 폴더 탐색 실패: 기본 디렉토리가 존재하지 않습니다 ({SEGMENTS_BASE_DIR})", FileNotFoundError())
         return []
@@ -49,9 +63,17 @@ def get_basic_segment_folders():
     try:
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
-                if not d.startswith("seg_multi") and ("세그먼트" in d or "seg" in d.lower() or "basic" in d.lower()):
-                    rel_path = os.path.relpath(os.path.join(root, d), SEGMENTS_BASE_DIR)
-                    folders.append(rel_path)
+                d_lower = d.lower()
+                # 단일 화자 및 다중 화자 프리픽스가 포함된 폴더는 원천 차단
+                if "single" in d_lower or "multi" in d_lower:
+                    continue
+                
+                # 기본 분석 정의: segment 또는 auto_recorded 포함
+                if d_lower.startswith("segment") or d_lower.startswith("auto_recorded"):
+                    target_path = os.path.join(root, d)
+                    if has_wav_files(target_path):
+                        rel_path = os.path.relpath(target_path, SEGMENTS_BASE_DIR)
+                        folders.append(rel_path)
     except Exception as e:
         log_error(MODULE_NAME, "기본 분석 폴더 탐색 중 예외 발생", e)
     return folders
@@ -292,9 +314,6 @@ def run_data_refinement_webui():
             with gr.Column(scale=1): page_info_md_bottom = gr.Markdown("### 페이지: 0 / 0", elem_classes=["page-info-bottom"])
             with gr.Column(scale=1): next_btn_bottom = gr.Button("다음 페이지 ➡️ ", interactive=False)
 
-        # -------------------------------------------------------------
-        # 1. 독립형 이벤트 핸들러 함수 정의
-        # -------------------------------------------------------------
         def handle_refresh_click():
             return (
                 gr.Dropdown(choices=get_single_speaker_folders()),
@@ -777,7 +796,6 @@ def run_data_refinement_webui():
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
                 return msg
             
-            # save_all_changes 반환값의 언패킹 개수 불일치 방지를 위해 튜플 인덱스로 안전하게 접근하도록 수정
             save_result = save_all_changes(items, history, redo, page_num, *args)
             new_items = save_result[0]
             save_msg = save_result[3]
@@ -800,9 +818,6 @@ def run_data_refinement_webui():
                 log_error(MODULE_NAME, f"화자 알고리즘 등록 중 예외 발생: {speaker_name}", e)
                 return f"[오류] 예외 발생: {e}"
 
-        # -------------------------------------------------------------
-        # 2. 버튼 및 이벤트 바인딩 (종료 버튼 동작 수정 반영)
-        # -------------------------------------------------------------
         close_ui_btn.click(
             fn=None, 
             inputs=[], 
@@ -820,7 +835,7 @@ def run_data_refinement_webui():
             load_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
             
         load_single_btn.click(fn=load_folder_data, inputs=[single_dropdown], outputs=load_outputs)
-        load_basic_btn.click(fn=load_folder_data, inputs=[load_basic_btn], outputs=load_outputs) if False else load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
+        load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
 
         pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): 
@@ -885,7 +900,6 @@ def run_data_refinement_webui():
         register_algo_inputs = [speaker_name_input, state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components
         register_algo_btn.click(fn=register_algo_action, inputs=register_algo_inputs, outputs=[info_box])
 
-    # 서버 실행 (블로킹 방지 및 터미널 input 제어 방식 적용)
     demo.launch(inbrowser=True, server_name="127.0.0.1", server_port=None, prevent_thread_lock=True)
     
     input("[*] Web UI가 실행되었습니다. 창을 닫거나 엔터를 누르면 종료됩니다.\n")

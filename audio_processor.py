@@ -221,14 +221,14 @@ def apply_uvr5_vocal_extraction(input_audio_path):
 
 def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
     while True:
-        print("\n================================================")
+        print("\n============================================== ")
         print("                분석 모드 선택")
-        print("================================================")
+        print("============================================== ")
         print(" 0. 기본 분석")
         print(" 1. 단일 화자 알고리즘 분석")
         print(" 2. 다중 화자 알고리즘 분석")
         print(" 3. 메뉴로 돌아가기")
-        print("------------------------------------------------")
+        print("---------------------------------------------- ")
         try:
             mode = input("선택: ").strip()
         except Exception:
@@ -252,7 +252,6 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
             passed_algorithms = []
             for algo_name in existing:
                 try:
-                    # [수정됨] 알고리즘 전체 평균 피치와 현재 오디오 전체의 평균 피치를 직접 대조
                     is_passed = ah.verify_single_speaker(algo_name, str(file_path)) if file_path and hasattr(ah, "verify_single_speaker") else False
                 except Exception:
                     is_passed = False
@@ -271,19 +270,18 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
             try:
                 target_path = str(file_path) if file_path else None
                 if hasattr(ah, "verify_multi_speakers_auto"):
-                    # [수정됨] 다중 화자 음원 전체에서 35% 이상 분포 일치 여부 검증 호출
-                    success, msg = ah.verify_multi_speakers_auto(target_path)
+                    success, matched_list, msg = ah.verify_multi_speakers_auto(target_path)
                 else:
-                    success, msg = False, "함수가 존재하지 않습니다."
+                    success, matched_list, msg = False, [], "함수가 존재하지 않습니다."
             except Exception as e:
-                success, msg = False, str(e)
+                success, matched_list, msg = False, [], str(e)
 
             if not success:
                 print(f"[차단] 다중 화자 검증 실패: {msg}")
                 continue
                 
-            print(f"[통과] 다중 화자 검증 성공: {msg}")
-            return existing, False, 2
+            print(f"[통과] 다중 화자 검증 성공: {matched_list}")
+            return matched_list, False, 2
         else:
             print("[오류] 올바른 번호를 입력해주세요.")
 
@@ -338,7 +336,14 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         parent_audio_dir = SEGMENTS_BASE_DIR / target_folder_name
         parent_audio_dir.mkdir(parents=True, exist_ok=True)
             
-        prefix_str = "seg_single" if is_single and active_speakers else "segment"
+        # [수정] 자동녹화 분석 폴더 명칭 규칙 적용 (영문)
+        if analysis_mode == 0:
+            prefix_str = "auto_recorded"
+        elif analysis_mode == 1:
+            prefix_str = "single_auto_recorded"
+        else:
+            prefix_str = "multi_auto_recorded"
+
         existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
         specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
         specific_segment_dir.mkdir(parents=True, exist_ok=True)
@@ -590,7 +595,14 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         parent_audio_dir = SEGMENTS_BASE_DIR / clean_source_name
         parent_audio_dir.mkdir(parents=True, exist_ok=True)
             
-        prefix_str = "seg_single" if is_single and active_speakers else "segment"
+        # [수정] 일반 파일 분석 폴더 명칭 규칙 적용 (영문)
+        if analysis_mode == 0:
+            prefix_str = "segment"
+        elif analysis_mode == 1:
+            prefix_str = "single_segment"
+        else:
+            prefix_str = "multi_segment"
+
         existing_subdirs = [d for d in parent_audio_dir.iterdir() if d.is_dir() and d.name.startswith(prefix_str)]
         specific_segment_dir = parent_audio_dir / f"{prefix_str}_{len(existing_subdirs) + 1:03d}"
         specific_segment_dir.mkdir(parents=True, exist_ok=True)
@@ -826,16 +838,16 @@ def select_and_process_audio_file(model=None):
 
         menu_items = [('auto', '자동녹화')] + [('file', wf) for wf in root_wavs]
 
-        print("\n==================================================")
+        print("\n============================================== ")
         print("                    오디오")
-        print("==================================================")
+        print("============================================== ")
         for idx, item in enumerate(menu_items, 1):
             name = item[1].name if item[0] == 'file' else item[1]
             print(f" {idx:2d}. {name}")
         
         back_idx = len(menu_items) + 1
         print(f" {back_idx:2d}. 메뉴로 돌아가기")
-        print("--------------------------------------------------")
+        print("---------------------------------------------- ")
         
         choice = input("분석할 항목 번호를 선택하세요: ").strip()
         if not choice.isdigit():
@@ -866,15 +878,15 @@ def select_and_process_audio_file(model=None):
 
                 sub_menu_items = [('folder', sd) for sd in auto_subdirs]
 
-                print("\n==================================================")
+                print("\n============================================== ")
                 print("                자동녹화 폴더 목록")
-                print("==================================================")
+                print("============================================== ")
                 for idx, item in enumerate(sub_menu_items, 1):
                     print(f" {idx:2d}. {item[1].name}")
                 
                 sub_back_idx = len(sub_menu_items) + 1
                 print(f" {sub_back_idx:2d}. 메뉴로 돌아가기")
-                print("--------------------------------------------------")
+                print("---------------------------------------------- ")
                 
                 sub_choice = input("탐색할 폴더 번호를 선택하세요: ").strip()
                 if not sub_choice.isdigit():

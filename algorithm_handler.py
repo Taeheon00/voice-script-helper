@@ -7,7 +7,7 @@ from resemblyzer import VoiceEncoder, preprocess_wav
 from pyannote.audio import Pipeline
 import librosa
 
-# 공통 에러 로거 연동 (단일화)
+# 공통 에러 로거 연동
 from error_logger import log_error, log_info
 
 STORAGE_DIR = "saved_algorithms"
@@ -34,7 +34,7 @@ def get_diarization_pipeline():
             auth_token = os.getenv("HUGGINGFACE_TOKEN") or True
             _DIARIZATION_PIPELINE = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
-                use_auth_token=auth_token
+                token=auth_token
             )
             if torch.cuda.is_available():
                 _DIARIZATION_PIPELINE.to(torch.device("cuda"))
@@ -98,7 +98,6 @@ def _extract_embedding_vector(audio_path):
         if encoder is None:
             return None
 
-        # Resemblyzer 권장 16kHz 포맷 보장을 위해 librosa로 로드 후 preprocess_wav 호환 처리 또는 직접 전달
         wav = preprocess_wav(audio_path)
         if len(wav) == 0:
             log_info(MODULE_NAME, f"경고: 오디오 데이터가 비어있습니다 ({audio_path})")
@@ -179,11 +178,33 @@ def register_or_update_algorithm(algo_name, audio_path, corrected_text, overall_
             json.dump(algo_data, f, ensure_ascii=False, indent=4)
         return True
     except Exception as e:
-        log_error(MODULE_NAME, f"프로파일 저장 실패 ({file_path})", e)
+        log_error(MODULE_NAME, f"프로파일 저장 실패 ({file_path})", f"{e}")
         return False
 
 def apply_text_corrections(text, algo_name):
     return text
+
+def process_and_forward_verified_algorithms(algorithms):
+    """
+    단일 화자 및 다중 화자 검증을 통과한 알고리즘(단일 이름 또는 목록)을 
+    동일하게 받아 ASR 또는 후속 파이프라인으로 전달하는 공통 함수
+    """
+    if isinstance(algorithms, str):
+        verified_list = [algorithms]
+    elif isinstance(algorithms, list):
+        verified_list = algorithms
+    else:
+        verified_list = []
+
+    if not verified_list:
+        log_info(MODULE_NAME, "전달할 검증된 알고리즘이 없습니다.")
+        return []
+
+    for algo_name in verified_list:
+        log_info(MODULE_NAME, f"검증 통과 알고리즘 ASR 전달 처리: {algo_name}")
+        # 단일 및 다중 화자 모두 동일하게 거쳐 가는 공통 ASR 전달 핸들링 영역
+
+    return verified_list
 
 def verify_single_speaker(algo_name, audio_path, threshold=0.75):
     """단일 화자 검증: 알고리즘 대표 임베딩과 입력 오디오 임베딩 간의 코사인 유사도 비교"""
@@ -218,15 +239,19 @@ def verify_single_speaker(algo_name, audio_path, threshold=0.75):
 
     similarity = _calculate_cosine_similarity(overall_embed, target_embed)
     
-    return similarity >= threshold
+    is_passed = similarity >= threshold
+    if is_passed:
+        # 검증 통과 시 공통 전달 함수 호출
+        process_and_forward_verified_algorithms(algo_name)
+
+    return is_passed
 
 def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
     """
-    다중 화자 검증:
-    1. Pyannote Diarization으로 입력 오디오의 실제 발화 구간(turn)들을 추출
-    2. 각 발화 구간별 오디오를 16kHz로 로드하여 Resemblyzer VoiceEncoder로 개별 발화 embedding 생성
-    3. 등록된 알고리즘의 samples[*]['embedding']들과 개별 발화 embedding들을 비교
-    4. 단 하나의 발화 구간이라도 등록 sample embedding과 threshold 이상이면 True 반환
+    다중 화자 검증 (TorchCodec 에러 우회 및 최신 pyannote 버전 대응 버전):
+    1. librosa를 통해 오디오를 텐서로 미리 로드하여 파이프라인에 전달 (torchcodec 우회)
+    2. Pyannote Diarization 수행 및 DiarizeOutput 대응
+    3. 너무 짧은 파편(2초 미만)을 거르고 개별 발화 구간 임베딩 비교
     """
     if CONFIG.get("enable_gpu_cache_clear", True):
         try:
@@ -246,15 +271,9 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
         log_error(MODULE_NAME, f"알고리즘 데이터 읽기 실패 ({algo_name})", e)
         return False
 
-    # 등록된 알고리즘의 samples에서 개별 sample embedding 목록 추출
-    samples = algo_data.get("samples", [])
-    registered_sample_embeddings = []
-    for sample in samples:
-        emb = sample.get("embedding", [])
-        if emb and len(emb) > 0:
-            registered_sample_embeddings.append(np.array(emb))
-
-    if not registered_sample_embeddings:
+    overall_embed = np.array(algo_data.get("overall_embedding", []))
+    if len(overall_embed) == 0:
+        log_info(MODULE_NAME, f"알고리즘에 유효한 전체 화자 임베딩이 없습니다 ({algo_name})")
         return False
 
     try:
@@ -263,18 +282,30 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
         if diarization_pipeline is None or encoder is None:
             return False
 
-        # Pyannote Diarization 수행
-        diarization = diarization_pipeline(audio_path)
-
-        # Resemblyzer가 요구하는 16kHz 샘플링 레이트로 오디오 로드 보장
         target_sr = 16000
-        y, sr = librosa.load(audio_path, sr=target_sr)
+        y, sr = librosa.load(audio_path, sr=target_sr, mono=True)
+        
+        waveform_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(0) 
+        audio_in_memory = {
+            "waveform": waveform_tensor,
+            "sample_rate": target_sr
+        }
 
-        # Diarization 결과에서 개별 발화 구간(turn) 단위로 순회
+        diarization_output = diarization_pipeline(audio_in_memory)
+
+        if hasattr(diarization_output, "speaker_diarization"):
+            diarization = diarization_output.speaker_diarization
+        else:
+            diarization = diarization_output
+
+        segment_count = 0
+        max_sim_found = 0.0
+
         for turn, _, _ in diarization.itertracks(yield_label=True):
             duration = turn.end - turn.start
-            # 너무 짧은 구간(예: 0.5초 미만)은 안정적인 embedding 추출이 어려우므로 건너뜀
-            if duration < 0.5:
+            
+            min_duration = 2.0 
+            if duration < min_duration:
                 continue
 
             start_sample = int(turn.start * target_sr)
@@ -284,13 +315,12 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
             if len(segment_audio) == 0:
                 continue
 
-            # Resemblyzer 입력 형태에 맞게 정규화
+            segment_count += 1
             normalized_wav = segment_audio.astype(np.float32)
             max_val = np.max(np.abs(normalized_wav))
             if max_val > 0:
                 normalized_wav /= max_val
 
-            # 개별 발화 구간의 embedding 추출
             try:
                 utterance_embed = encoder.embed_utterance(normalized_wav)
             except Exception:
@@ -299,18 +329,20 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
             if utterance_embed is None or len(utterance_embed) == 0:
                 continue
 
-            # 등록된 모든 sample embedding들과 개별 발화 embedding 비교
-            for reg_embed in registered_sample_embeddings:
-                similarity = _calculate_cosine_similarity(reg_embed, utterance_embed)
-                if similarity >= threshold:
-                    log_info(MODULE_NAME,
-                             f"다중 화자 검증 통과 (등록 sample과 일치하는 발화 구간 발견) "
-                             f"(algo: {algo_name}, similarity: {similarity:.4f})"
-                    )
-                    return True
+            similarity = _calculate_cosine_similarity(overall_embed, utterance_embed)
+            if similarity > max_sim_found:
+                max_sim_found = similarity
+
+            if similarity >= threshold:
+                log_info(MODULE_NAME,
+                         f"다중 화자 검증 통과 (대표 임베딩과 일치하는 발화 구간 발견) "
+                         f"(algo: {algo_name}, similarity: {similarity:.4f})"
+                )
+                return True
 
         log_info(MODULE_NAME,
-                 f"다중 화자 검증 실패 (일치하는 화자 발화 구간 없음) "
+                 f"다중 화자 검증 실패 (분석된 세그먼트 수: {segment_count}개, "
+                 f"측정된 최고 유사도: {max_sim_found:.4f} < threshold: {threshold}) "
                  f"(algo: {algo_name})"
         )
         return False
@@ -320,23 +352,31 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
         return False
 
 def verify_multi_speakers_auto(audio_path):
-    """등록된 모든 알고리즘을 순회하며 다중 화자 오디오 내에 해당 화자가 존재하는지 자동 검증"""
+    """
+    등록된 모든 알고리즘을 전부 순회하며 다중 화자 오디오 내에 
+    일치하는 화자들을 모두 색출하여 통과된 알고리즘 목록을 반환 후 공통 전달 함수 호출
+    """
     existing_profiles = load_existing_profiles()
     if not existing_profiles:
         log_info(MODULE_NAME, "다중 화자 자동 검증 실패: 등록된 알고리즘 프로파일이 없습니다.")
-        return False, "등록된 알고리즘 프로파일이 없습니다."
+        return False, [], "등록된 알고리즘 프로파일이 없습니다."
 
-    matched_any = False
+    matched_algorithms = []
+    
     for algo_name in existing_profiles:
         if verify_multi_speaker(algo_name, audio_path):
-            matched_any = True
-            break 
+            matched_algorithms.append(algo_name)
 
-    if not matched_any:
+    if not matched_algorithms:
         log_info(MODULE_NAME, f"다중 화자 자동 검증 실패: 일치하는 화자를 찾을 수 없음 ({audio_path})")
-        return False, "오디오 내에 일치하는 등록된 화자 알고리즘이 전혀 없어 분석을 진행할 수 없습니다."
+        return False, [], "오디오 내에 일치하는 등록된 화자 알고리즘이 전혀 없어 분석을 진행할 수 없습니다."
 
-    return True, "다중 화자 검증 통과"
+    log_info(MODULE_NAME, f"다중 화자 자동 검증 통과된 알고리즘 목록: {matched_algorithms} ({audio_path})")
+    
+    # 다중 화자 검증 통과 알고리즘 목록을 공통 전달 함수로 전달
+    process_and_forward_verified_algorithms(matched_algorithms)
+    
+    return True, matched_algorithms, "다중 화자 검증 통과"
 
 def register_dataset_from_refined_folder(algo_name, folder_path):
     if not os.path.exists(folder_path):
