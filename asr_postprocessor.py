@@ -24,8 +24,6 @@ def normalize_korean_numbers_strict(text):
     if not text:
         return text
 
-    text = re.sub(r'멤버\s*(?:십|10|열)\s*인데\b', '멤버십인데', text)
-    text = re.sub(r'멤버십\s*인데\b', '멤버십인데', text)
     text = re.sub(r'영수\s*증\b', '영수증', text)
 
     kor_to_num_map = {
