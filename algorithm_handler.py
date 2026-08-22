@@ -138,57 +138,10 @@ def _extract_speaker_embedding_from_segments(segment_paths):
     speaker_centroid = speaker_centroid / np.linalg.norm(speaker_centroid)
     return speaker_centroid
 
-def register_or_update_algorithm(algo_name, audio_path, corrected_text, overall_embedding=None):
-    ensure_handler_directories()
-    
-    embed = _extract_embedding_vector(audio_path)
-    if embed is None:
-        log_info(MODULE_NAME, f"경고: 유효한 화자 임베딩이 검출되지 않았습니다 ({audio_path})")
-
-    file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
-    
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                algo_data = json.load(f)
-        except Exception as e:
-            log_error(MODULE_NAME, f"프로파일 파일 로드 실패, 새로 생성합니다 ({file_path})", e)
-            algo_data = {}
-    else:
-        algo_data = {}
-
-    if not algo_data:
-        algo_data = {
-            "algo_name": algo_name,
-            "overall_embedding": [],
-            "samples": []
-        }
-
-    new_sample = {
-        "embedding": embed.tolist() if embed is not None else [],
-        "corrected_text": corrected_text
-    }
-    algo_data.setdefault("samples", []).append(new_sample)
-
-    if overall_embedding is not None:
-        algo_data["overall_embedding"] = overall_embedding.tolist()
-
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(algo_data, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        log_error(MODULE_NAME, f"프로파일 저장 실패 ({file_path})", f"{e}")
-        return False
-
 def apply_text_corrections(text, algo_name):
     return text
 
 def process_and_forward_verified_algorithms(algorithms):
-    """
-    단일 화자 및 다중 화자 검증을 통과한 알고리즘(단일 이름 또는 목록)을 
-    동일하게 받아 ASR 또는 후속 파이프라인으로 전달하는 공통 함수
-    """
     if isinstance(algorithms, str):
         verified_list = [algorithms]
     elif isinstance(algorithms, list):
@@ -202,12 +155,13 @@ def process_and_forward_verified_algorithms(algorithms):
 
     for algo_name in verified_list:
         log_info(MODULE_NAME, f"검증 통과 알고리즘 ASR 전달 처리: {algo_name}")
-        # 단일 및 다중 화자 모두 동일하게 거쳐 가는 공통 ASR 전달 핸들링 영역
 
     return verified_list
 
 def verify_single_speaker(algo_name, audio_path, threshold=0.75):
-    """단일 화자 검증: 알고리즘 대표 임베딩과 입력 오디오 임베딩 간의 코사인 유사도 비교"""
+    return verify_single_speaker_multi_files(algo_name, [audio_path], threshold)
+
+def verify_single_speaker_multi_files(algo_name, audio_paths, threshold=0.75):
     if CONFIG.get("enable_gpu_cache_clear", True):
         try:
             torch.cuda.empty_cache()
@@ -233,26 +187,25 @@ def verify_single_speaker(algo_name, audio_path, threshold=0.75):
         log_info(MODULE_NAME, f"알고리즘에 유효한 전체 화자 임베딩이 없습니다 ({algo_name})")
         return False
 
-    target_embed = _extract_embedding_vector(audio_path)
-    if target_embed is None:
-        return False
+    passed = False
+    for audio_path in audio_paths:
+        target_embed = _extract_embedding_vector(audio_path)
+        if target_embed is None:
+            continue
 
-    similarity = _calculate_cosine_similarity(overall_embed, target_embed)
-    
-    is_passed = similarity >= threshold
-    if is_passed:
-        # 검증 통과 시 공통 전달 함수 호출
+        similarity = _calculate_cosine_similarity(overall_embed, target_embed)
+        
+        if similarity >= threshold:
+            log_info(MODULE_NAME, f"분할 오디오 단일 화자 검증 통과 (algo: {algo_name}, path: {audio_path}, similarity: {similarity:.4f})")
+            passed = True
+
+    if passed:
         process_and_forward_verified_algorithms(algo_name)
+        return True
 
-    return is_passed
+    return False
 
 def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
-    """
-    다중 화자 검증 (TorchCodec 에러 우회 및 최신 pyannote 버전 대응 버전):
-    1. librosa를 통해 오디오를 텐서로 미리 로드하여 파이프라인에 전달 (torchcodec 우회)
-    2. Pyannote Diarization 수행 및 DiarizeOutput 대응
-    3. 너무 짧은 파편(2초 미만)을 거르고 개별 발화 구간 임베딩 비교
-    """
     if CONFIG.get("enable_gpu_cache_clear", True):
         try:
             torch.cuda.empty_cache()
@@ -334,79 +287,102 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
                 max_sim_found = similarity
 
             if similarity >= threshold:
-                log_info(MODULE_NAME,
-                         f"다중 화자 검증 통과 (대표 임베딩과 일치하는 발화 구간 발견) "
-                         f"(algo: {algo_name}, similarity: {similarity:.4f})"
-                )
                 return True
 
-        log_info(MODULE_NAME,
-                 f"다중 화자 검증 실패 (분석된 세그먼트 수: {segment_count}개, "
-                 f"측정된 최고 유사도: {max_sim_found:.4f} < threshold: {threshold}) "
-                 f"(algo: {algo_name})"
-        )
         return False
 
     except Exception as e:
-        log_error(MODULE_NAME, f"다중 화자 Diarization 및 발화별 임베딩 검증 중 예외 발생 ({audio_path})", e)
+        log_error(MODULE_NAME, f"다중 화자 Diarization 예외 발생 ({audio_path})", e)
         return False
 
 def verify_multi_speakers_auto(audio_path):
-    """
-    등록된 모든 알고리즘을 전부 순회하며 다중 화자 오디오 내에 
-    일치하는 화자들을 모두 색출하여 통과된 알고리즘 목록을 반환 후 공통 전달 함수 호출
-    """
+    return verify_multi_speakers_auto_from_segments([audio_path])
+
+def verify_multi_speakers_auto_from_segments(audio_paths):
     existing_profiles = load_existing_profiles()
     if not existing_profiles:
-        log_info(MODULE_NAME, "다중 화자 자동 검증 실패: 등록된 알고리즘 프로파일이 없습니다.")
         return False, [], "등록된 알고리즘 프로파일이 없습니다."
 
-    matched_algorithms = []
-    
+    matched_algorithms = set()
     for algo_name in existing_profiles:
-        if verify_multi_speaker(algo_name, audio_path):
-            matched_algorithms.append(algo_name)
+        algorithm_passed = False
+        for audio_path in audio_paths:
+            if verify_multi_speaker(algo_name, audio_path):
+                algorithm_passed = True
+        if algorithm_passed:
+            matched_algorithms.add(algo_name)
 
-    if not matched_algorithms:
-        log_info(MODULE_NAME, f"다중 화자 자동 검증 실패: 일치하는 화자를 찾을 수 없음 ({audio_path})")
-        return False, [], "오디오 내에 일치하는 등록된 화자 알고리즘이 전혀 없어 분석을 진행할 수 없습니다."
+    matched_list = list(matched_algorithms)
+    if not matched_list:
+        return False, [], "오디오 내에 일치하는 등록된 화자 알고리즘이 전혀 없습니다."
 
-    log_info(MODULE_NAME, f"다중 화자 자동 검증 통과된 알고리즘 목록: {matched_algorithms} ({audio_path})")
-    
-    # 다중 화자 검증 통과 알고리즘 목록을 공통 전달 함수로 전달
-    process_and_forward_verified_algorithms(matched_algorithms)
-    
-    return True, matched_algorithms, "다중 화자 검증 통과"
+    process_and_forward_verified_algorithms(matched_list)
+    return True, matched_list, "다중 화자 검증 통과"
 
 def register_dataset_from_refined_folder(algo_name, folder_path):
-    if not os.path.exists(folder_path):
-        log_error(MODULE_NAME, f"지정된 폴더를 찾을 수 없습니다: {folder_path}")
+    """
+    폴더 내 세그먼트를 순회하며 기존 샘플과 비교하여:
+    1. 동일한 `txt_path`가 존재하면 내용을 수정(덮어쓰기)하고,
+    2. 새로 추가된 `txt_path`는 샘플에 추가하며,
+    3. 폴더에서 사라진(삭제된) 세그먼트는 샘플 목록에서 제거합니다.
+    4. 대표 임베딩(overall_embedding)도 현재 폴더 기준 전체 세그먼트로 재계산합니다.
+    """
+    folder_path_str = str(folder_path)
+    if not os.path.exists(folder_path_str):
+        log_error(MODULE_NAME, f"지정된 폴더를 찾을 수 없습니다: {folder_path_str}")
         return False
         
     try:
-        wav_files = [f for f in os.listdir(folder_path) if f.endswith(".wav")]
+        wav_files = [f for f in os.listdir(folder_path_str) if f.lower().endswith(".wav")]
     except Exception as e:
-        log_error(MODULE_NAME, f"폴더 파일 목록 읽기 실패 ({folder_path})", e)
+        log_error(MODULE_NAME, f"폴더 파일 목록 읽기 실패 ({folder_path_str})", e)
         return False
 
     if not wav_files:
-        log_info(MODULE_NAME, f"폴더 내에 .wav 파일이 없습니다: {folder_path}")
+        log_info(MODULE_NAME, f"폴더 내에 .wav 파일이 없습니다: {folder_path_str}")
         return False
 
-    wav_paths = [
-        os.path.join(folder_path, wav)
-        for wav in wav_files
-    ]
+    wav_paths = [os.path.join(folder_path_str, wav) for wav in wav_files]
 
+    # 1. 전체 세그먼트 기반 대표 임베딩 재계산
     overall_embedding = _extract_speaker_embedding_from_segments(wav_paths)
     if overall_embedding is None:
-        log_error(MODULE_NAME, f"폴더 내 세그먼트로부터 전체 화자 임베딩 추출 실패 ({folder_path})")
+        log_error(MODULE_NAME, f"폴더 내 세그먼트로부터 전체 화자 임베딩 추출 실패 ({folder_path_str})")
         return False
-        
+
+    ensure_handler_directories()
+    file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
+    
+    # 기존 프로파일 로드 또는 기본 구조 생성
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                algo_data = json.load(f)
+        except Exception:
+            algo_data = {}
+    else:
+        algo_data = {}
+
+    if not algo_data:
+        algo_data = {
+            "algo_name": algo_name,
+            "overall_embedding": [],
+            "samples": []
+        }
+
+    # 기존 샘플들을 딕셔너리 형태로 변환 (Key: txt_path)
+    existing_samples_map = {
+        sample.get("txt_path"): sample 
+        for sample in algo_data.get("samples", []) 
+        if sample.get("txt_path")
+    }
+
+    new_samples_list = []
+
+    # 2. 폴더 내 파일들을 순회하며 수정 및 추가 반영
     for wav in wav_files:
-        wav_path = os.path.join(folder_path, wav)
         base_name = os.path.splitext(wav)[0]
-        txt_path = os.path.join(folder_path, f"{base_name}.txt")
+        txt_path = os.path.join(folder_path_str, f"{base_name}.txt")
         
         corrected_text = ""
         if os.path.exists(txt_path):
@@ -416,26 +392,35 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
             except Exception as e:
                 log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({txt_path})", e)
 
-        register_or_update_algorithm(algo_name, wav_path, corrected_text, overall_embedding)
-        
-    return True
+        normalized_txt_path = str(txt_path)
+
+        # 이미 존재하는 세그먼트라면 텍스트 내용 갱신 (덮어쓰기), 없으면 신규 추가
+        if normalized_txt_path in existing_samples_map:
+            sample_item = existing_samples_map[normalized_txt_path]
+            sample_item["corrected_text"] = corrected_text
+            new_samples_list.append(sample_item)
+        else:
+            new_sample = {
+                "txt_path": normalized_txt_path,
+                "corrected_text": corrected_text
+            }
+            new_samples_list.append(new_sample)
+
+    # 3. 데이터 업데이트 반영
+    algo_data["samples"] = new_samples_list
+    algo_data["overall_embedding"] = overall_embedding.tolist()
+    algo_data["source_folder"] = folder_path_str
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(algo_data, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        log_error(MODULE_NAME, f"프로파일 저장 실패 ({file_path})", f"{e}")
+        return False
 
 def register_dataset_from_refined_folder_with_path(algo_name, folder_path):
-    success = register_dataset_from_refined_folder(algo_name, folder_path)
-    if success:
-        file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    algo_data = json.load(f)
-                
-                algo_data["source_folder"] = str(folder_path)
-                
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(algo_data, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                log_error(MODULE_NAME, f"세그먼트 폴더 경로 기록 중 예외 발생 ({algo_name})", e)
-    return success
+    return register_dataset_from_refined_folder(algo_name, folder_path)
 
 def get_chatbot_texts_from_source_folder(algo_name):
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
@@ -448,9 +433,17 @@ def get_chatbot_texts_from_source_folder(algo_name):
         with open(file_path, "r", encoding="utf-8") as f:
             algo_data = json.load(f)
             
+        samples = algo_data.get("samples", [])
+        if samples:
+            for sample in samples:
+                txt_content = sample.get("corrected_text", "").strip()
+                if txt_content:
+                    texts.append(txt_content)
+            if texts:
+                return texts
+
         source_folder = algo_data.get("source_folder")
         if not source_folder or not os.path.exists(source_folder):
-            log_info(MODULE_NAME, f"기록된 세그먼트 폴더를 찾을 수 없습니다 ({algo_name})")
             return texts
 
         for file_name in os.listdir(source_folder):
@@ -461,10 +454,10 @@ def get_chatbot_texts_from_source_folder(algo_name):
                         content = tf.read().strip()
                         if content:
                             texts.append(content)
-                except Exception as e:
-                    log_error(MODULE_NAME, f"세그먼트 텍스트 파일 읽기 실패 ({txt_file_path})", e)
+                except Exception:
+                    pass
                     
-    except Exception as e:
-        log_error(MODULE_NAME, f"세그먼트 폴더 기반 텍스트 추출 중 예외 발생 ({algo_name})", e)
+    except Exception:
+        pass
         
     return texts
