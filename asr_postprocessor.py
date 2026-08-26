@@ -135,7 +135,7 @@ def normalize_korean_numbers_strict(text):
     return text
 
 
-def clean_text_advanced(text):
+def clean_text_advanced(text, apply_number_normalization=True):
     if not text:
         return ""
     
@@ -143,7 +143,7 @@ def clean_text_advanced(text):
         return ""
         
     cleaned = text.strip()
-    cleaned = normalize_korean_numbers_strict(cleaned)
+    if apply_number_normalization: cleaned = normalize_korean_numbers_strict(cleaned)
     
     if re.search(r"([ㄱ-ㅎㅏ-ㅣ])\1{4,}", cleaned):
         return ""
@@ -176,7 +176,7 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         if not chunk_text:
             return ""
 
-        cleaned = clean_text_advanced(chunk_text)
+        cleaned = clean_text_advanced(chunk_text, apply_number_normalization=(mapped_speaker is None))
         if not cleaned:
             return ""
 
@@ -187,6 +187,7 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         # 전달된 화자 알고리즘 규칙 적용
         if mapped_speaker:
             raw_text = apply_algorithm_text_correction(raw_text, mapped_speaker)
+            raw_text = normalize_korean_numbers_strict(raw_text)
 
         if len(raw_text) < 2 and not re.search(r'[0-9]', raw_text):
             return ""

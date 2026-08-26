@@ -6,6 +6,7 @@ import torch
 from resemblyzer import VoiceEncoder, preprocess_wav
 from pyannote.audio import Pipeline
 import librosa
+import re
 
 # 공통 에러 로거 연동
 from error_logger import log_error, log_info
@@ -139,7 +140,89 @@ def _extract_speaker_embedding_from_segments(segment_paths):
     return speaker_centroid
 
 def apply_text_corrections(text, algo_name):
-    return text
+    if not text or not algo_name:
+        return text
+
+    try:
+        file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
+
+        if not os.path.exists(file_path):
+            return text
+        with open(file_path, "r", encoding="utf-8") as f:
+            algo_data = json.load(f)
+
+        samples = algo_data.get("samples", [])
+
+        if not samples:
+            return text
+
+        corrected_texts = []
+
+        for sample in samples:
+            corrected_text = sample.get("corrected_text", "").strip()
+
+            if corrected_text:
+                corrected_texts.append(corrected_text)
+
+        from difflib import SequenceMatcher
+
+        normalized_text = re.sub(r"\s+", "", text)
+
+        best_text = text
+        best_similarity = 0.0
+
+        for corrected_text in corrected_texts:
+            normalized_corrected = re.sub(r"\s+", "", corrected_text)
+
+            similarity = SequenceMatcher(None,normalized_text,normalized_corrected).ratio()
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_text = corrected_text
+
+        if best_similarity >= 0.60:
+            return best_text
+
+        current_words = text.split()
+        replacement_map = {}
+
+        for corrected_text in corrected_texts:
+
+            corrected_words = corrected_text.split()
+
+            for current_word in current_words:
+                current_clean = re.sub(r"[^\w가-힣0-9]", "", current_word)
+
+                if len(current_clean) < 2:
+                    continue
+
+                best_word = None
+                best_word_similarity = 0.0
+
+                for corrected_word in corrected_words:
+                    corrected_clean = re.sub(r"[^\w가-힣0-9]","",corrected_word)
+
+                    if len(corrected_clean) < 2:
+                        continue
+
+                    word_similarity = SequenceMatcher(None,current_clean,corrected_clean).ratio()
+
+                    if word_similarity > best_word_similarity:
+                        best_word_similarity = word_similarity
+                        best_word = corrected_word
+
+                if (best_word is not None and best_word_similarity >= 0.70 and best_word != current_word):
+                    if (current_word not in replacement_map or best_word_similarity > replacement_map[current_word][1]):
+                        replacement_map[current_word] = (best_word, best_word_similarity)
+
+        for current_word, (replacement, _) in replacement_map.items():
+            text = re.sub(rf"(?<!\S){re.escape(current_word)}(?!\S)",replacement,text)
+
+        return text
+
+    except Exception as e:
+        log_error(MODULE_NAME,f"알고리즘 텍스트 보정 실패 ({algo_name})",e)
+        return text
 
 def process_and_forward_verified_algorithms(algorithms):
     if isinstance(algorithms, str):
