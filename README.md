@@ -6,10 +6,11 @@
    - 터미널(CMD 또는 PowerShell)을 열고 아래 명령어를 입력하여 프로젝트를 다운로드합니다.
    - git clone <깃허브_REPOSITORY_URL>
    - cd voice-script-helper
+   - python 3.10 환경에서 진행해주시기바랍니다. (3.10이상 버전에서 필수 설치 패키지 호환이 안될 수 있습니다.)
 
 2. **가상 환경 생성 및 활성화 (권장)**
    - python -m venv venv
-   - 윈도우(Windows)의 경우: `venv\Scripts\activate
+   - 윈도우(Windows)의 경우: venv\Scripts\activate
 
 3. **필수 라이브러리 설치**
    - 프로젝트 구동에 필요한 라이브러리를 일괄 설치합니다.
