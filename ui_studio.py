@@ -56,7 +56,7 @@ def get_single_speaker_folders():
     return folders
 
 def get_basic_segment_folders():
-    """기본 분석 폴더(실제 WAV 파일이 있는 폴더) 조회"""
+    """기본 분석 폴더(실제 WAV 파일이 있는 폴더) 조회 (원본 탐색 로직 복구)"""
     if not os.path.exists(SEGMENTS_BASE_DIR):
         log_error(MODULE_NAME, f"기본 분석 폴더 탐색 실패: 기본 디렉토리가 존재하지 않습니다 ({SEGMENTS_BASE_DIR})", FileNotFoundError())
         return []
@@ -90,8 +90,52 @@ def get_algorithm_json_files():
 def clone_items(items):
     return [item.copy() for item in items]
 
-# 화자 매핑 및 표시 로직 제거 (항상 세그먼트 번호만 반환)
-def get_segment_label(item, segment_number, speaker_map=None):
+def extract_speaker_from_filename(filename):
+    """파일명에서 화자 번호를 추출하고 1을 더해 반환 (예: speaker_00 -> 1)"""
+    matches = re.findall(r'speaker_(\d+)', filename, re.IGNORECASE)
+    if matches:
+        try:
+            num = int(matches[0]) + 1
+            return str(num), True
+        except ValueError:
+            pass
+    return "1", False
+
+def check_folder_speaker_type(target_dir):
+    """
+    폴더 전체의 파일명을 스캔하여 화자 번호가 몇 종류인지 확인합니다.
+    """
+    if not os.path.exists(target_dir):
+        return "1", False
+        
+    try:
+        files = os.listdir(target_dir)
+        all_speakers = set()
+        for f in files:
+            spk_str, found = extract_speaker_from_filename(f)
+            if found:
+                all_speakers.add(spk_str)
+                
+        if not all_speakers:
+            return "1", False
+            
+        unique_speakers = sorted(list(all_speakers), key=lambda x: int(x) if x.isdigit() else x)
+        if len(unique_speakers) == 1:
+            return unique_speakers[0], False  # 단일 화자
+        else:
+            return ", ".join(unique_speakers), True  # 다중 화자
+    except Exception as e:
+        log_error(MODULE_NAME, "폴더 화자 유형 분석 중 예외 발생", e)
+        return "1", False
+
+def get_segment_label(item, segment_number):
+    """
+    다중 화자일 경우 개별 파일의 화자 번호(1부터 시작)를 반영하여 '세그먼트 N-화자X' 형태로 표시합니다.
+    """
+    is_mixed = item.get("is_mixed", False)
+    speaker_num = item.get("speaker_num", "1")
+    if is_mixed:
+        return f"세그먼트 {segment_number}-화자{speaker_num}"
     return f"세그먼트 {segment_number}"
 
 def inspect_all_files(target_dir):
@@ -357,7 +401,7 @@ def run_data_refinement_webui():
                 gr.update(interactive=has_next)
             )
 
-        def load_folder_data(folder_name):
+        def load_folder_data(folder_name, is_single_mode=False):
             cleanup_old_temp_files()
             empty_pagination = (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False))
             if not folder_name:
@@ -386,8 +430,13 @@ def run_data_refinement_webui():
                 log_error(MODULE_NAME, f"{msg} ({folder_name})", ValueError(msg))
                 return [[], [], [], 1, msg, "### 페이지: 0 / 0 (총 0개 항목)", "### 페이지: 0 / 0"] + list(empty_pagination) + [gr.update(visible=False), gr.update(value=None, label="세그먼트 1"), gr.update(value="", label="세그먼트 1"), False, "", ""] * ITEMS_PER_PAGE
                 
+            _, folder_is_mixed = check_folder_speaker_type(target_dir)
+
             items = []
-            for w_f in wav_files:
+            single_count = 0
+            multi_count = 0
+
+            for idx, w_f in enumerate(wav_files):
                 base_name = os.path.splitext(w_f)[0]
                 w_path = os.path.join(target_dir, w_f)
                 t_path = os.path.join(target_dir, f"{base_name}.txt")
@@ -401,13 +450,24 @@ def run_data_refinement_webui():
                         log_error(MODULE_NAME, f"텍스트 파일 읽기 오류: {t_path}", e)
                         t_content = ""
                 
+                if is_single_mode:
+                    speaker_num, is_mixed = "1", False
+                    single_count += 1
+                else:
+                    speaker_num, _ = extract_speaker_from_filename(w_f)
+                    is_mixed = folder_is_mixed
+                    if is_mixed:
+                        multi_count += 1
+                    else:
+                        single_count += 1
+
                 items.append({
                     "wav": w_path, "txt": t_path, "content": t_content, "original_content": t_content, 
                     "deleted": False, "folder_name": folder_name, "wav_filename": w_f,
-                    "speaker_num": "1", "is_mixed": False, "selected": False,
+                    "speaker_num": speaker_num, "is_mixed": is_mixed, "selected": False,
                     "audio_segment": None, "is_new": False
                 })
-            
+
             surviving = [it for it in items if not it["deleted"]]
             total_pages = int(np.ceil(len(surviving) / ITEMS_PER_PAGE)) or 1
             status_msg = f"총 {len(items)}개의 세그먼트 로드 완료 (총 {total_pages}페이지)."
@@ -606,17 +666,20 @@ def run_data_refinement_webui():
                 base_name = os.path.splitext(target_item["wav_filename"])[0]
                 current_content = target_item["content"]
 
+                speaker_num = target_item.get("speaker_num", "1")
+                is_mixed = target_item.get("is_mixed", False)
+
                 split_items = [
                     {
                         "wav": os.path.join(base_dir, f"{base_name}_part1.wav"), "txt": os.path.join(base_dir, f"{base_name}_part1.txt"),
                         "content": current_content, "original_content": "", "deleted": False, "folder_name": target_item["folder_name"],
-                        "wav_filename": f"{base_name}_part1.wav", "speaker_num": "1", "is_mixed": False, "selected": False,
+                        "wav_filename": f"{base_name}_part1.wav", "speaker_num": speaker_num, "is_mixed": is_mixed, "selected": False,
                         "audio_segment": part1_audio, "is_new": True
                     },
                     {
                         "wav": os.path.join(base_dir, f"{base_name}_part2.wav"), "txt": os.path.join(base_dir, f"{base_name}_part2.txt"),
                         "content": current_content, "original_content": "", "deleted": False, "folder_name": target_item["folder_name"],
-                        "wav_filename": f"{base_name}_part2.wav", "speaker_num": "1", "is_mixed": False, "selected": False,
+                        "wav_filename": f"{base_name}_part2.wav", "speaker_num": speaker_num, "is_mixed": is_mixed, "selected": False,
                         "audio_segment": part2_audio, "is_new": True
                     }
                 ]
@@ -705,8 +768,8 @@ def run_data_refinement_webui():
                     "deleted": False,
                     "folder_name": first_item["folder_name"],
                     "wav_filename": f"{base_name}_merged.wav",
-                    "speaker_num": "1",
-                    "is_mixed": False,
+                    "speaker_num": first_item.get("speaker_num", "1"),
+                    "is_mixed": first_item.get("is_mixed", False),
                     "selected": False,
                     "audio_segment": cur_audio,
                     "is_new": True
@@ -831,6 +894,40 @@ def run_data_refinement_webui():
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
                 return msg
             
+            # 1. 먼저 현재 상태를 동기화하여 검사 준비
+            half = len(text_components)
+            current_texts = args[:half]
+            current_checkboxes = args[half:]
+            current_state = sync_current_data(items, page_num, current_texts, current_checkboxes)
+            
+            # 2. 살아남은(deleted가 아닌) 세그먼트들의 화자 종류(speaker_num) 추출
+            surviving_items = [it for it in current_state if not it["deleted"]]
+            if not surviving_items:
+                msg = "[오류] 등록할 유효한 세그먼트가 존재하지 않습니다."
+                log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
+                return msg
+
+            speakers_found = set()
+            for it in surviving_items:
+                # 파일명 재검사 혹은 item에 저장된 speaker_num 확인
+                spk, _ = extract_speaker_from_filename(it["wav_filename"])
+                if not spk:
+                    spk = it.get("speaker_num", "1")
+                speakers_found.add(spk)
+
+            # 3. 다중 화자 검증 (남은 화자가 2개 이상이거나 기존 폴더가 다중 화자인 경우 차단)
+            # 만약 다중 화자 상태가 남아있다면 등록 불가능하도록 제한
+            folder_path = os.path.dirname(surviving_items[0]["txt"]) if surviving_items else ""
+            _, folder_is_mixed = check_folder_speaker_type(folder_path)
+
+            if len(speakers_found) > 1 or folder_is_mixed:
+                # 단일 화자만 남았는지 체크 (사용자가 세그먼트 삭제 등을 통해 한 화자만 남겼는지 확인)
+                # 만약 surviving_items 전체의 화자 번호가 모두 동일하다면 다중화자 여부 해제 가능 판단
+                if len(speakers_found) > 1:
+                    msg = "[경고] 다중 화자 세그먼트가 감지되었습니다. 단일 화자 데이터로 정제한 후에만 등록할 수 있습니다."
+                    log_error(MODULE_NAME, "알고리즘 등록 실패 (다중 화자 잔존)", ValueError(msg))
+                    return msg
+
             save_result = save_all_changes(items, history, redo, page_num, *args)
             new_items = save_result[0]
             save_msg = save_result[3]
@@ -869,8 +966,8 @@ def run_data_refinement_webui():
         for i in range(ITEMS_PER_PAGE): 
             load_outputs.extend([row_components[i], audio_components[i], text_components[i], select_checkbox_components[i], txt_path_components[i], wav_path_components[i]])
             
-        load_single_btn.click(fn=load_folder_data, inputs=[single_dropdown], outputs=load_outputs)
-        load_basic_btn.click(fn=load_folder_data, inputs=[basic_dropdown], outputs=load_outputs)
+        load_single_btn.click(fn=lambda folder: load_folder_data(folder, is_single_mode=True), inputs=[single_dropdown], outputs=load_outputs)
+        load_basic_btn.click(fn=lambda folder: load_folder_data(folder, is_single_mode=False), inputs=[basic_dropdown], outputs=load_outputs)
 
         pagination_outputs = [state_items, state_page, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): 

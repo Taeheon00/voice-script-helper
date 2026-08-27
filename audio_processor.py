@@ -192,6 +192,9 @@ def apply_uvr5_vocal_extraction(input_audio_path):
     uvr_start_time = time.time()
     
     try:
+        if CONFIG.get("enable_gpu_cache_clear", True):
+            torch.cuda.empty_cache()
+
         if _uvr5_separator_instance is None:
             _uvr5_separator_instance = Separator(output_dir=str(target_uvr5_dir))
         else:
@@ -236,8 +239,16 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
         
         if mode == "3":
             return None, False, 3
+            
         if mode == "0":
-            return [], False, 0
+            while True:
+                is_single_input = input("단일 화자입니까? (y: 단일, n: 다중): ").strip().lower()
+                if is_single_input in ['y', 'yes']:
+                    return [], True, 0
+                elif is_single_input in ['n', 'no']:
+                    return [], False, 0
+                else:
+                    print("[오류] 'y' 또는 'n'을 입력해주세요.")
 
         try:
             existing = ah.load_existing_profiles()
@@ -264,6 +275,7 @@ def configure_strict_analysis_pipeline(audio_data, sample_rate, file_path=None):
                 continue
                 
             print(f"[통과] 단일 화자 피치 검증 성공 (매칭된 알고리즘: {', '.join(passed_algorithms)})")
+            # 단일 화자 알고리즘 분석 시 질문 없이 자동으로 단일 화자(1명) 설정 적용[cite: 3]
             return passed_algorithms, True, 1
             
         elif mode == "2":
@@ -404,9 +416,10 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
             file_duration = vocal_audio_data.shape[0] / TARGET_SAMPLE_RATE
             file_audio_cache.append((file_path_obj, vocal_audio_data, file_duration))
 
+        batch_speaker_turns = []
+        
         print(f"\n화자 분리 수행 중 (총 {total_files}개 파일)")
         stage2_start = time.time()
-        batch_speaker_turns = []
         for f_idx, (file_path_obj, vocal_audio_data, file_duration) in enumerate(file_audio_cache, 1):
             print_clean_stage_progress(f_idx, total_files, stage2_start)
 
@@ -421,7 +434,12 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
                         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
                         pipeline.to(torch.device(DEVICE))
                         tensor_audio = torch.from_numpy(vocal_audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
-                        diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE})
+                        
+                        diarization_kwargs = {}
+                        if is_single:
+                            diarization_kwargs["num_speakers"] = 1
+
+                        diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE}, **diarization_kwargs)
                         annotation = getattr(diarization, "speaker_diarization", diarization)
                         
                         for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -477,6 +495,9 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
                     from transformers import logging as hf_logging
                     hf_logging.set_verbosity_error()
                     
+                    if CONFIG.get("enable_gpu_cache_clear", True):
+                        torch.cuda.empty_cache()
+
                     with torch.no_grad():
                         res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
                     
@@ -634,10 +655,11 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
 
         total_duration = vocal_audio_data.shape[0] / TARGET_SAMPLE_RATE
 
+        raw_speaker_turns = []
+        
         print(f"\n화자 분리 수행 중")
         stage2_start = time.time()
         print_clean_stage_progress(1, 1, stage2_start)
-        raw_speaker_turns = []
         
         if HAS_PYANNOTE:
             token = get_huggingface_token()
@@ -649,7 +671,12 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
                     pipeline.to(torch.device(DEVICE))
                     tensor_audio = torch.from_numpy(vocal_audio_data).unsqueeze(0).to(torch.float32).to(DEVICE)
-                    diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE})
+                    
+                    diarization_kwargs = {}
+                    if is_single:
+                        diarization_kwargs["num_speakers"] = 1
+
+                    diarization = pipeline({"waveform": tensor_audio, "sample_rate": TARGET_SAMPLE_RATE}, **diarization_kwargs)
                     annotation = getattr(diarization, "speaker_diarization", diarization)
                     
                     for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -701,6 +728,9 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
                     from transformers import logging as hf_logging
                     hf_logging.set_verbosity_error()
                     
+                    if CONFIG.get("enable_gpu_cache_clear", True):
+                        torch.cuda.empty_cache()
+
                     with torch.no_grad():
                         res_chunk = model.transcribe((chunk_audio, TARGET_SAMPLE_RATE))
                     
@@ -914,7 +944,7 @@ def select_and_process_audio_file(model=None):
                 current_model = model or load_asr_model()
                 if current_model is None:
                     print("[오류] 모델을 로드할 수 없습니다.")
-                    return
+                    continue
 
                 try:
                     sample_audio_data, sr = sf.read(str(sub_wavs[0]))
@@ -928,10 +958,10 @@ def select_and_process_audio_file(model=None):
                     )
                     if active_speakers is None and analysis_mode == 3:
                         print("[알림] 분석이 취소되었습니다.")
-                        return
+                        continue
                 except Exception as e:
                     log_error(MODULE_NAME, "분석 파이프라인 설정 중 예외 발생", e)
-                    return
+                    continue
 
                 execute_batch_analysis_flow(current_model, sub_wavs, active_speakers, is_single, analysis_mode, target_folder.name)
                 return
