@@ -4,6 +4,7 @@ import tempfile
 import sys
 import asyncio
 import logging
+import json
 import numpy as np
 import gradio as gr
 from pydub import AudioSegment
@@ -13,6 +14,7 @@ from error_logger import log_error, log_info
 MODULE_NAME = "RefinementStudioUI"
 
 SEGMENTS_BASE_DIR = "segments_base"
+ALGORITHM_DIR = "saved_algorithms"  # algorithm_handler의 STORAGE_DIR과 경로 일치시킴
 ITEMS_PER_PAGE = 10
 
 if not hasattr(ah, "split_audio_segment"):
@@ -44,7 +46,6 @@ def get_single_speaker_folders():
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
                 d_lower = d.lower()
-                # 단일 화자 분석 정의: single_segment 또는 single_auto_recorded 포함
                 if d_lower.startswith("single_segment") or d_lower.startswith("single_auto_recorded"):
                     target_path = os.path.join(root, d)
                     if has_wav_files(target_path):
@@ -64,11 +65,8 @@ def get_basic_segment_folders():
         for root, dirs, files in os.walk(SEGMENTS_BASE_DIR):
             for d in dirs:
                 d_lower = d.lower()
-                # 단일 화자 및 다중 화자 프리픽스가 포함된 폴더는 원천 차단
                 if "single" in d_lower or "multi" in d_lower:
                     continue
-                
-                # 기본 분석 정의: segment 또는 auto_recorded 포함
                 if d_lower.startswith("segment") or d_lower.startswith("auto_recorded"):
                     target_path = os.path.join(root, d)
                     if has_wav_files(target_path):
@@ -78,20 +76,23 @@ def get_basic_segment_folders():
         log_error(MODULE_NAME, "기본 분석 폴더 탐색 중 예외 발생", e)
     return folders
 
+def get_algorithm_json_files():
+    """알고리즘 JSON 파일 목록 조회 및 '-- 선택 안함 --' 기본 옵션 추가"""
+    files = []
+    if os.path.exists(ALGORITHM_DIR):
+        try:
+            files = [f for f in os.listdir(ALGORITHM_DIR) if f.lower().endswith('.json')]
+        except Exception as e:
+            log_error(MODULE_NAME, "알고리즘 JSON 파일 탐색 중 예외 발생", e)
+            return ["-- 선택 안함 --"]
+    return ["-- 선택 안함 --"] + files
+
 def clone_items(items):
     return [item.copy() for item in items]
 
-def check_custom_single_format(filename_or_foldername):
-    if not filename_or_foldername:
-        return False, "1"
-    cleaned = os.path.splitext(filename_or_foldername)[0].lower()
-    parts = cleaned.split("_")
-    if len(parts) >= 5 and parts[0] == "seg" and parts[1] == "sub":
-        if parts[3] == "a":
-            return True, "1"
-    if len(parts) > 0 and parts[0] == "a":
-        return True, "1"
-    return False, "1"
+# 화자 매핑 및 표시 로직 제거 (항상 세그먼트 번호만 반환)
+def get_segment_label(item, segment_number, speaker_map=None):
+    return f"세그먼트 {segment_number}"
 
 def inspect_all_files(target_dir):
     if not os.path.exists(target_dir):
@@ -127,12 +128,10 @@ class ConnectionDisconnectFilter(logging.Filter):
             exc_type, exc_value, _ = record.exc_info
             if exc_type:
                 message += f" {exc_type.__name__} {str(exc_value)}"
-        
         ignore_keywords = [
             "ConnectionResetError", "WinError 10054", "connection reset",
             "connection closed", "broken pipe", "websockets.exceptions", "peer closed connection"
         ]
-        
         lower_msg = message.lower()
         for kw in ignore_keywords:
             if kw.lower() in lower_msg:
@@ -159,20 +158,17 @@ class StderrDisconnectFilter:
 def setup_connection_log_suppression():
     target_loggers = ["uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "websockets"]
     filter_instance = ConnectionDisconnectFilter()
-    
     for logger_name in target_loggers:
         lg = logging.getLogger(logger_name)
         lg.addFilter(filter_instance)
         for handler in lg.handlers:
             if filter_instance not in handler.filters:
                 handler.addFilter(filter_instance)
-
     root_lg = logging.getLogger()
     root_lg.addFilter(filter_instance)
     for handler in root_lg.handlers:
         if filter_instance not in handler.filters:
             handler.addFilter(filter_instance)
-
     if not isinstance(sys.stderr, StderrDisconnectFilter):
         sys.stderr = StderrDisconnectFilter(sys.stderr)
 
@@ -188,9 +184,11 @@ def run_data_refinement_webui():
 
     single_folders = get_single_speaker_folders()
     basic_folders = get_basic_segment_folders()
+    algo_json_files = get_algorithm_json_files()
     
     default_single = single_folders[0] if single_folders else None
     default_basic = basic_folders[0] if basic_folders else None
+    default_algo_selection = algo_json_files[0] if algo_json_files else "-- 선택 안함 --"
 
     active_temp_files = set()
 
@@ -232,6 +230,18 @@ def run_data_refinement_webui():
         margin: 0 auto !important; cursor: pointer !important; accent-color: #ff7f50 !important;
         pointer-events: auto !important;
     }
+    .align-stretch-row {
+        align-items: stretch !important;
+    }
+    .tall-action-btn, .tall-action-btn button {
+        height: 100% !important;
+        min-height: 100px !important;
+        font-size: 16px !important;
+        font-weight: bold !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
     """
 
     with gr.Blocks(title="데이터 정제 스튜디오", css=custom_css) as demo:
@@ -259,13 +269,14 @@ def run_data_refinement_webui():
         with gr.Row():
             refresh_btn = gr.Button("🔄 전체 목록 새로고침")
 
-        with gr.Row(variant="panel"):
+        with gr.Row(variant="panel", elem_classes=["align-stretch-row"]):
             with gr.Column(scale=2):
-                speaker_name_input = gr.Textbox(label="등록할 화자 이름", placeholder="예: 화자_a", lines=1)
+                speaker_name_input = gr.Textbox(label="등록할 화자 이름", placeholder="예: 화자_a", lines=1, interactive=True)
+                algo_json_dropdown = gr.Dropdown(choices=algo_json_files, value=default_algo_selection, label="기존 알고리즘 JSON 선택", interactive=True)
             with gr.Column(scale=1):
-                save_all_btn = gr.Button("💾 저장", variant="secondary")
-            with gr.Column(scale=1):
-                register_algo_btn = gr.Button("알고리즘 등록/업데이트", variant="primary")
+                save_all_btn = gr.Button("💾 저장", variant="secondary", elem_classes=["tall-action-btn"])
+            with gr.Column(scale=2):
+                register_algo_btn = gr.Button("알고리즘 등록/업데이트", variant="primary", elem_classes=["tall-action-btn"])
 
         info_box = gr.Textbox(label="현재 진행 상황", value="작업할 폴더를 선택하고 '불러오기' 버튼을 누르세요.", interactive=False)
 
@@ -314,10 +325,26 @@ def run_data_refinement_webui():
             with gr.Column(scale=1): page_info_md_bottom = gr.Markdown("### 페이지: 0 / 0", elem_classes=["page-info-bottom"])
             with gr.Column(scale=1): next_btn_bottom = gr.Button("다음 페이지 ➡️ ", interactive=False)
 
+        def on_textbox_change(val):
+            if val and val.strip():
+                return gr.Dropdown(value="-- 선택 안함 --")
+            return gr.Dropdown()
+
+        def on_dropdown_change(val):
+            if val and val != "-- 선택 안함 --":
+                return gr.Textbox(value="")
+            return gr.Textbox()
+
+        speaker_name_input.change(fn=on_textbox_change, inputs=[speaker_name_input], outputs=[algo_json_dropdown])
+        algo_json_dropdown.change(fn=on_dropdown_change, inputs=[algo_json_dropdown], outputs=[speaker_name_input])
+
         def handle_refresh_click():
+            new_choices = get_algorithm_json_files()
+            default_val = new_choices[0] if new_choices else "-- 선택 안함 --"
             return (
                 gr.Dropdown(choices=get_single_speaker_folders()),
-                gr.Dropdown(choices=get_basic_segment_folders())
+                gr.Dropdown(choices=get_basic_segment_folders()),
+                gr.Dropdown(choices=new_choices, value=default_val)
             )
 
         def get_pagination_states(page_num, total_pages):
@@ -396,15 +423,11 @@ def run_data_refinement_webui():
                     elif os.path.exists(item["wav"]):
                         import shutil
                         shutil.copyfile(item["wav"], temp_path)
+
+                    label_str = get_segment_label(item, i + 1)
                     
-                    updates.extend([
-                        gr.update(visible=True), 
-                        gr.update(value=temp_path, label=f"세그먼트 {i+1}"), 
-                        gr.update(value=item["content"], label=f"세그먼트 {i+1}"), 
-                        item.get("selected", False), 
-                        item["txt"], 
-                        item["wav"]
-                    ])
+                    updates.extend([gr.update(visible=True),gr.update(value=temp_path, label=label_str),gr.update(value=item["content"], label=label_str),item.get("selected", False),item["txt"],item["wav"]])
+                                    
                 else:
                     updates.extend([gr.update(visible=False), gr.update(value=None, label=f"세그먼트 {i+1}"), gr.update(value="", label=f"세그먼트 {i+1}"), False, "", ""])
             
@@ -429,7 +452,7 @@ def run_data_refinement_webui():
                 if i < len(page_surviving):
                     item = page_surviving[i]
                     global_idx_display = start_idx + i + 1
-                    label_str = f"세그먼트 {global_idx_display}"
+                    label_str = get_segment_label(item, global_idx_display)
                     
                     temp_path = create_tracked_temp_wav()
                     if item.get("audio_segment") is not None:
@@ -662,6 +685,9 @@ def run_data_refinement_webui():
                     res = render_page(new_items, page_num)
                     return [new_items, history, redo, msg, gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
+                new_history = history + [clone_items(new_items)]
+                new_redo = []
+
                 first_item = selected_items[0]
                 for target_it in selected_items:
                     target_it["deleted"] = True
@@ -688,14 +714,11 @@ def run_data_refinement_webui():
 
                 first_orig_idx = new_items.index(first_item)
                 new_items.insert(first_orig_idx + 1, merged_item)
-
-                new_history = history + [clone_items(items)]
-                new_redo = []
                 
                 surviving = [it for it in new_items if not it["deleted"]]
                 target_page = (surviving.index(merged_item) // ITEMS_PER_PAGE) + 1 if merged_item in surviving else 1
                 res = render_page(new_items, target_page)
-                return [new_items, new_history, new_redo, f"선택된 {len(selected_items)}개 세그먼트 합병 완료 (저장 시 적용)", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
+                return [new_items, new_history, new_redo, f"선택된 {len(selected_items)}개 세그먼트 합병 완료 (저장 시 적용)", gr.update(interactive=True), gr.update(interactive=False)] + res
             except Exception as e:
                 log_error(MODULE_NAME, "세그먼트 합병 중 예외 발생", e)
                 res = render_page(new_items, page_num)
@@ -785,12 +808,24 @@ def run_data_refinement_webui():
                 res = render_page(items, page_num)
                 return [items, history, redo, f"[오류] 저장 실패: {e}", gr.update(interactive=bool(history)), gr.update(interactive=bool(redo))] + res
 
-        def register_algo_action(speaker_name, items, history, redo, page_num, *args):
-            speaker_name = speaker_name.strip()
-            if not speaker_name:
-                msg = "[오류] 화자 이름을 입력해주세요."
+        def register_algo_action(speaker_name, algo_json_val, items, history, redo, page_num, *args):
+            speaker_name = speaker_name.strip() if speaker_name else ""
+            
+            selected_json = ""
+            if algo_json_val and algo_json_val != "-- 선택 안함 --":
+                selected_json = algo_json_val
+
+            if speaker_name and selected_json:
+                msg = "[오류] 화자 이름 직접 입력과 알고리즘 JSON 선택 중 하나만 선택해주세요."
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
                 return msg
+
+            target_name = speaker_name if speaker_name else os.path.splitext(selected_json)[0]
+            if not target_name:
+                msg = "[오류] 등록할 화자 이름을 입력하거나 알고리즘 JSON을 선택해주세요."
+                log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
+                return msg
+
             if not items:
                 msg = "[오류] 로드된 데이터가 없습니다."
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", ValueError(msg))
@@ -809,13 +844,13 @@ def run_data_refinement_webui():
                     msg = "[오류] 폴더 경로를 찾을 수 없습니다."
                     log_error(MODULE_NAME, f"알고리즘 등록 실패: {msg}", FileNotFoundError(msg))
                     return msg
-                success = ah.register_dataset_from_refined_folder(speaker_name, os.path.dirname(first_txt_path))
-                if success: return f"[🎉 성공] '{speaker_name}' 화자 알고리즘 등록 완료!"
+                success = ah.register_dataset_from_refined_folder(target_name, os.path.dirname(first_txt_path))
+                if success: return f"[🎉 성공] '{target_name}' 화자 알고리즘 등록 완료!"
                 msg = "[오류] 등록 처리 중 문제가 발생했습니다."
-                log_error(MODULE_NAME, f"알고리즘 등록 실패: {speaker_name} - {msg}", RuntimeError(msg))
+                log_error(MODULE_NAME, f"알고리즘 등록 실패: {target_name} - {msg}")
                 return msg
             except Exception as e:
-                log_error(MODULE_NAME, f"화자 알고리즘 등록 중 예외 발생: {speaker_name}", e)
+                log_error(MODULE_NAME, f"화자 알고리즘 등록 중 예외 발생: {target_name}", e)
                 return f"[오류] 예외 발생: {e}"
 
         close_ui_btn.click(
@@ -828,7 +863,7 @@ def run_data_refinement_webui():
             outputs=[]
         )
 
-        refresh_btn.click(fn=handle_refresh_click, outputs=[single_dropdown, basic_dropdown])
+        refresh_btn.click(fn=handle_refresh_click, outputs=[single_dropdown, basic_dropdown, algo_json_dropdown])
         
         load_outputs = [state_items, state_history, state_redo, state_page, info_box, page_info_md, page_info_md_bottom, prev_btn, next_btn, prev_btn_bottom, next_btn_bottom]
         for i in range(ITEMS_PER_PAGE): 
@@ -897,7 +932,7 @@ def run_data_refinement_webui():
 
         save_all_btn.click(fn=save_all_changes, inputs=[state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components, outputs=save_outputs)
 
-        register_algo_inputs = [speaker_name_input, state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components
+        register_algo_inputs = [speaker_name_input, algo_json_dropdown, state_items, state_history, state_redo, state_page] + text_components + select_checkbox_components
         register_algo_btn.click(fn=register_algo_action, inputs=register_algo_inputs, outputs=[info_box])
 
     demo.launch(inbrowser=True, server_name="127.0.0.1", server_port=None, prevent_thread_lock=True)

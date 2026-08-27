@@ -336,7 +336,6 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         parent_audio_dir = SEGMENTS_BASE_DIR / target_folder_name
         parent_audio_dir.mkdir(parents=True, exist_ok=True)
             
-        # [수정] 자동녹화 분석 폴더 명칭 규칙 적용 (영문)
         if analysis_mode == 0:
             prefix_str = "auto_recorded"
         elif analysis_mode == 1:
@@ -442,7 +441,7 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
         
         for orig_s in unique_orig_speakers:
             matched_name = None
-            if hasattr(ah, "match_speaker_by_profile_features"):
+            if analysis_mode != 0 and hasattr(ah, "match_speaker_by_profile_features"):
                 try:
                     matched_name = ah.match_speaker_by_profile_features(orig_s, active_speakers)
                 except Exception:
@@ -450,9 +449,9 @@ def execute_batch_analysis_flow(model, sub_wavs, active_speakers, is_single, ana
             
             if matched_name:
                 speaker_mapping[orig_s] = matched_name
-            elif active_speakers and len(active_speakers) == 1:
+            elif analysis_mode != 0 and active_speakers and len(active_speakers) == 1:
                 speaker_mapping[orig_s] = active_speakers[0]
-            elif active_speakers and len(active_speakers) > 1:
+            elif analysis_mode != 0 and active_speakers and len(active_speakers) > 1:
                 speaker_mapping[orig_s] = active_speakers[min(unique_orig_speakers.index(orig_s), len(active_speakers)-1)]
             else:
                 speaker_mapping[orig_s] = orig_s
@@ -595,7 +594,6 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         parent_audio_dir = SEGMENTS_BASE_DIR / clean_source_name
         parent_audio_dir.mkdir(parents=True, exist_ok=True)
             
-        # [수정] 일반 파일 분석 폴더 명칭 규칙 적용 (영문)
         if analysis_mode == 0:
             prefix_str = "segment"
         elif analysis_mode == 1:
@@ -668,7 +666,7 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
         
         for orig_s in unique_orig_speakers:
             matched_name = None
-            if hasattr(ah, "match_speaker_by_profile_features"):
+            if analysis_mode != 0 and hasattr(ah, "match_speaker_by_profile_features"):
                 try:
                     matched_name = ah.match_speaker_by_profile_features(orig_s, active_speakers)
                 except Exception:
@@ -676,9 +674,9 @@ def execute_analysis_flow(model, file_path, active_speakers, is_single, analysis
             
             if matched_name:
                 speaker_mapping[orig_s] = matched_name
-            elif active_speakers and len(active_speakers) == 1:
+            elif analysis_mode != 0 and active_speakers and len(active_speakers) == 1:
                 speaker_mapping[orig_s] = active_speakers[0]
-            elif active_speakers and len(active_speakers) > 1:
+            elif analysis_mode != 0 and active_speakers and len(active_speakers) > 1:
                 speaker_mapping[orig_s] = active_speakers[min(unique_orig_speakers.index(orig_s), len(active_speakers)-1)]
             else:
                 speaker_mapping[orig_s] = orig_s

@@ -7,9 +7,19 @@ from resemblyzer import VoiceEncoder, preprocess_wav
 from pyannote.audio import Pipeline
 import librosa
 import re
+from difflib import SequenceMatcher
 
 # 공통 에러 로거 연동
 from error_logger import log_error, log_info
+
+# 형태소 분석기(Mecab) 초기화 시도
+try:
+    from konlpy.tag import Mecab
+    _MECAB = Mecab()
+    HAS_MECAB = True
+except (ImportError, Exception):
+    _MECAB = None
+    HAS_MECAB = False
 
 STORAGE_DIR = "saved_algorithms"
 MODULE_NAME = "AlgorithmHandler"
@@ -133,11 +143,11 @@ def _extract_speaker_embedding_from_segments(segment_paths):
             all_embeddings.append(embed)
 
     if not all_embeddings:
-        return None
+        return None, []
 
     speaker_centroid = np.mean(all_embeddings, axis=0)
     speaker_centroid = speaker_centroid / np.linalg.norm(speaker_centroid)
-    return speaker_centroid
+    return speaker_centroid, all_embeddings
 
 def apply_text_corrections(text, algo_name):
     if not text or not algo_name:
@@ -157,71 +167,62 @@ def apply_text_corrections(text, algo_name):
             return text
 
         corrected_texts = []
-
         for sample in samples:
             corrected_text = sample.get("corrected_text", "").strip()
-
             if corrected_text:
                 corrected_texts.append(corrected_text)
 
-        from difflib import SequenceMatcher
-
         normalized_text = re.sub(r"\s+", "", text)
 
-        best_text = text
         best_similarity = 0.0
+        best_matched_corrected_text = text
 
         for corrected_text in corrected_texts:
             normalized_corrected = re.sub(r"\s+", "", corrected_text)
-
-            similarity = SequenceMatcher(None,normalized_text,normalized_corrected).ratio()
+            similarity = SequenceMatcher(None, normalized_text, normalized_corrected).ratio()
 
             if similarity > best_similarity:
                 best_similarity = similarity
-                best_text = corrected_text
+                best_matched_corrected_text = corrected_text
 
-        if best_similarity >= 0.60:
-            return best_text
+        if best_similarity >= 0.70:
+            return best_matched_corrected_text
 
-        current_words = text.split()
-        replacement_map = {}
+        if not HAS_MECAB or _MECAB is None:
+            return text
 
-        for corrected_text in corrected_texts:
+        current_morphs = _MECAB.pos(text)
+        
+        target_content_words = set()
+        for c_text in corrected_texts:
+            for word, pos in _MECAB.pos(c_text):
+                if pos.startswith(('NN', 'SL', 'SN')) and len(word) >= 2:
+                    target_content_words.add(word)
 
-            corrected_words = corrected_text.split()
+        new_sentence_tokens = []
+        for word, pos in current_morphs:
+            if not pos.startswith(('NN', 'SL', 'SN')) or len(word) < 2:
+                new_sentence_tokens.append(word)
+                continue
 
-            for current_word in current_words:
-                current_clean = re.sub(r"[^\w가-힣0-9]", "", current_word)
+            best_sub_word = word
+            highest_sim = 0.0
 
-                if len(current_clean) < 2:
-                    continue
+            for t_word in target_content_words:
+                sim = SequenceMatcher(None, word, t_word).ratio()
+                if sim > highest_sim:
+                    highest_sim = sim
+                    best_sub_word = t_word
 
-                best_word = None
-                best_word_similarity = 0.0
+            if highest_sim >= 0.85:
+                new_sentence_tokens.append(best_sub_word)
+            else:
+                new_sentence_tokens.append(word)
 
-                for corrected_word in corrected_words:
-                    corrected_clean = re.sub(r"[^\w가-힣0-9]","",corrected_word)
-
-                    if len(corrected_clean) < 2:
-                        continue
-
-                    word_similarity = SequenceMatcher(None,current_clean,corrected_clean).ratio()
-
-                    if word_similarity > best_word_similarity:
-                        best_word_similarity = word_similarity
-                        best_word = corrected_word
-
-                if (best_word is not None and best_word_similarity >= 0.70 and best_word != current_word):
-                    if (current_word not in replacement_map or best_word_similarity > replacement_map[current_word][1]):
-                        replacement_map[current_word] = (best_word, best_word_similarity)
-
-        for current_word, (replacement, _) in replacement_map.items():
-            text = re.sub(rf"(?<!\S){re.escape(current_word)}(?!\S)",replacement,text)
-
-        return text
+        return "".join(new_sentence_tokens)
 
     except Exception as e:
-        log_error(MODULE_NAME,f"알고리즘 텍스트 보정 실패 ({algo_name})",e)
+        log_error(MODULE_NAME, f"알고리즘 텍스트 보정 실패 ({algo_name})", e)
         return text
 
 def process_and_forward_verified_algorithms(algorithms):
@@ -241,10 +242,10 @@ def process_and_forward_verified_algorithms(algorithms):
 
     return verified_list
 
-def verify_single_speaker(algo_name, audio_path, threshold=0.75):
+def verify_single_speaker(algo_name, audio_path, threshold=0.80):
     return verify_single_speaker_multi_files(algo_name, [audio_path], threshold)
 
-def verify_single_speaker_multi_files(algo_name, audio_paths, threshold=0.75):
+def verify_single_speaker_multi_files(algo_name, audio_paths, threshold=0.80):
     if CONFIG.get("enable_gpu_cache_clear", True):
         try:
             torch.cuda.empty_cache()
@@ -288,7 +289,7 @@ def verify_single_speaker_multi_files(algo_name, audio_paths, threshold=0.75):
 
     return False
 
-def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
+def verify_multi_speaker(algo_name, audio_path, threshold=0.80):
     if CONFIG.get("enable_gpu_cache_clear", True):
         try:
             torch.cuda.empty_cache()
@@ -334,44 +335,78 @@ def verify_multi_speaker(algo_name, audio_path, threshold=0.75):
         else:
             diarization = diarization_output
 
-        segment_count = 0
-        max_sim_found = 0.0
+        speaker_embeddings = {}
+        speaker_durations = {}
 
-        for turn, _, _ in diarization.itertracks(yield_label=True):
+        for turn, _, speaker_label in diarization.itertracks(yield_label=True):
+
             duration = turn.end - turn.start
-            
-            min_duration = 2.0 
+
+            min_duration = 2.0
             if duration < min_duration:
                 continue
 
             start_sample = int(turn.start * target_sr)
             end_sample = int(turn.end * target_sr)
-            
+
             segment_audio = y[start_sample:end_sample]
+
             if len(segment_audio) == 0:
                 continue
 
-            segment_count += 1
-            normalized_wav = segment_audio.astype(np.float32)
-            max_val = np.max(np.abs(normalized_wav))
-            if max_val > 0:
-                normalized_wav /= max_val
-
             try:
+                normalized_wav = preprocess_wav(segment_audio, source_sr=target_sr)
+
+                if len(normalized_wav) == 0:
+                    continue
+
                 utterance_embed = encoder.embed_utterance(normalized_wav)
+
             except Exception:
                 continue
 
             if utterance_embed is None or len(utterance_embed) == 0:
                 continue
 
-            similarity = _calculate_cosine_similarity(overall_embed, utterance_embed)
-            if similarity > max_sim_found:
-                max_sim_found = similarity
+            if speaker_label not in speaker_embeddings:
+                speaker_embeddings[speaker_label] = []
+                speaker_durations[speaker_label] = 0.0
+
+            speaker_embeddings[speaker_label].append(utterance_embed)
+            speaker_durations[speaker_label] += duration
+
+        best_similarity = 0.0
+        best_speaker = None
+
+        for speaker_label, embeddings in speaker_embeddings.items():
+
+            if not embeddings:
+                continue
+
+            speaker_centroid = np.mean(embeddings, axis=0)
+
+            norm = np.linalg.norm(speaker_centroid)
+
+            if norm == 0:
+                continue
+
+            speaker_centroid = speaker_centroid / norm
+
+            similarity = _calculate_cosine_similarity(overall_embed, speaker_centroid)
+
+            total_duration = speaker_durations.get(speaker_label, 0.0)
+
+            log_info(MODULE_NAME, f"다중 화자 검증 - 화자: {speaker_label}, 총 발화시간: {total_duration:.2f}초, 구간 수: {len(embeddings)}, 유사도: {similarity:.4f}")
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_speaker = speaker_label
 
             if similarity >= threshold:
+                log_info(MODULE_NAME, f"다중 화자 검증 통과 (algo: {algo_name}, speaker: {speaker_label}, similarity: {similarity:.4f}, duration: {total_duration:.2f}s)")
                 return True
 
+        log_info(MODULE_NAME, f"다중 화자 검증 실패 (algo: {algo_name}, 최고 화자: {best_speaker}, 최고 유사도: {best_similarity:.4f})")
         return False
 
     except Exception as e:
@@ -403,13 +438,6 @@ def verify_multi_speakers_auto_from_segments(audio_paths):
     return True, matched_list, "다중 화자 검증 통과"
 
 def register_dataset_from_refined_folder(algo_name, folder_path):
-    """
-    폴더 내 세그먼트를 순회하며 기존 샘플과 비교하여:
-    1. 동일한 `txt_path`가 존재하면 내용을 수정(덮어쓰기)하고,
-    2. 새로 추가된 `txt_path`는 샘플에 추가하며,
-    3. 폴더에서 사라진(삭제된) 세그먼트는 샘플 목록에서 제거합니다.
-    4. 대표 임베딩(overall_embedding)도 현재 폴더 기준 전체 세그먼트로 재계산합니다.
-    """
     folder_path_str = str(folder_path)
     if not os.path.exists(folder_path_str):
         log_error(MODULE_NAME, f"지정된 폴더를 찾을 수 없습니다: {folder_path_str}")
@@ -427,24 +455,88 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
 
     wav_paths = [os.path.join(folder_path_str, wav) for wav in wav_files]
 
-    # 1. 전체 세그먼트 기반 대표 임베딩 재계산
-    overall_embedding = _extract_speaker_embedding_from_segments(wav_paths)
-    if overall_embedding is None:
+    # 신규 폴더 세그먼트 임베딩 추출 및 대표값 계산
+    new_centroid, new_embeddings = _extract_speaker_embedding_from_segments(wav_paths)
+    if new_centroid is None:
         log_error(MODULE_NAME, f"폴더 내 세그먼트로부터 전체 화자 임베딩 추출 실패 ({folder_path_str})")
         return False
 
     ensure_handler_directories()
     file_path = os.path.join(STORAGE_DIR, f"{algo_name}.json")
     
-    # 기존 프로파일 로드 또는 기본 구조 생성
-    if os.path.exists(file_path):
+    all_embeddings_for_centroid = new_embeddings.copy()
+    algo_data = {}
+    is_existing_profile = os.path.exists(file_path)
+
+    existing_source_folders = []
+
+    if is_existing_profile:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 algo_data = json.load(f)
-        except Exception:
-            algo_data = {}
+            
+            existing_embed = np.array(algo_data.get("overall_embedding", []))
+            
+            raw_old_folder = algo_data.get("source_folder")
+            if isinstance(raw_old_folder, list):
+                existing_source_folders = raw_old_folder
+            elif isinstance(raw_old_folder, str) and raw_old_folder.strip():
+                existing_source_folders = [raw_old_folder]
+
+            is_exact_same_files = False
+            matched_old_folder = None
+            normalized_new_folder = os.path.abspath(folder_path_str)
+            new_file_paths = {os.path.abspath(path) for path in wav_paths}
+
+            for old_f in existing_source_folders:
+                if not old_f:
+                    continue
+                try:
+                    normalized_old_folder = os.path.abspath(old_f)
+                    if normalized_old_folder != normalized_new_folder:
+                        continue
+
+                    old_file_paths = {os.path.abspath(os.path.join(old_f, f)) for f in os.listdir(old_f) if f.lower().endswith(".wav")}
+                    if old_file_paths == new_file_paths:
+                        is_exact_same_files = True
+                        matched_old_folder = old_f
+                        break
+                except Exception:
+                    pass
+            
+            if is_exact_same_files:
+                log_info(MODULE_NAME, f"동일한 세부 파일 경로 내 수정/저장 감지: 검증을 생략하고 그대로 업데이트합니다 ({folder_path_str})")
+            elif len(existing_embed) > 0:
+                similarity_threshold = 0.90  
+                similarity = _calculate_cosine_similarity(existing_embed, new_centroid)
+
+                log_info(MODULE_NAME, f"알고리즘 업데이트 화자 검증 - 신규 폴더 대표 임베딩 유사도: {similarity:.4f}")
+
+                if similarity < similarity_threshold:
+                    # [변경점] 여기서는 log_error 대신 상세 사유를 담은 info 로그를 남기고 안전하게 False를 반환하여 메시지 중첩 방지
+                    log_info(MODULE_NAME, f"알고리즘 업데이트 거부: 신규 경로의 대표 화자가 기존 알고리즘 화자와 일치하지 않습니다. (유사도: {similarity:.4f}, 기준: {similarity_threshold:.2f})")
+                    return False
+
+                for old_f in existing_source_folders:
+                    if old_f and os.path.exists(old_f):
+                        old_wav_files = [os.path.join(old_f, f) for f in os.listdir(old_f) if f.lower().endswith(".wav")]
+                        for old_path in old_wav_files:
+                            old_embed = _extract_embedding_vector(old_path)
+                            if old_embed is not None:
+                                all_embeddings_for_centroid.append(old_embed)
+
+        except Exception as e:
+            # [변경점] 예외 발생 시 구체적인 에러 메시지를 UI단으로 정확히 전달할 수 있도록 로그 처리 조정
+            err_msg = f"기존 임베딩 비교 중 예외 발생 ({algo_name}): {str(e)}"
+            log_error(MODULE_NAME, err_msg)
+            return False
+
+    # 전체 세그먼트(기존 + 신규)를 종합하여 최종 대표 임베딩 재계산
+    if all_embeddings_for_centroid:
+        final_centroid = np.mean(all_embeddings_for_centroid, axis=0)
+        overall_embedding = final_centroid / np.linalg.norm(final_centroid)
     else:
-        algo_data = {}
+        overall_embedding = new_centroid
 
     if not algo_data:
         algo_data = {
@@ -453,7 +545,6 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
             "samples": []
         }
 
-    # 기존 샘플들을 딕셔너리 형태로 변환 (Key: txt_path)
     existing_samples_map = {
         sample.get("txt_path"): sample 
         for sample in algo_data.get("samples", []) 
@@ -462,37 +553,57 @@ def register_dataset_from_refined_folder(algo_name, folder_path):
 
     new_samples_list = []
 
-    # 2. 폴더 내 파일들을 순회하며 수정 및 추가 반영
-    for wav in wav_files:
-        base_name = os.path.splitext(wav)[0]
-        txt_path = os.path.join(folder_path_str, f"{base_name}.txt")
-        
-        corrected_text = ""
-        if os.path.exists(txt_path):
-            try:
-                with open(txt_path, "r", encoding="utf-8") as tf:
-                    corrected_text = tf.read().strip()
-            except Exception as e:
-                log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({txt_path})", e)
+    # 새로운 폴더가 추가된 경우 기존 샘플들과 병합 유지 처리
+    if is_existing_profile and not is_exact_same_files:
+        old_samples = algo_data.get("samples", [])
+        new_samples_list = old_samples.copy()
 
-        normalized_txt_path = str(txt_path)
+        for wav in wav_files:
+            base_name = os.path.splitext(wav)[0]
+            txt_path = os.path.join(folder_path_str, f"{base_name}.txt")
 
-        # 이미 존재하는 세그먼트라면 텍스트 내용 갱신 (덮어쓰기), 없으면 신규 추가
-        if normalized_txt_path in existing_samples_map:
-            sample_item = existing_samples_map[normalized_txt_path]
-            sample_item["corrected_text"] = corrected_text
-            new_samples_list.append(sample_item)
-        else:
-            new_sample = {
-                "txt_path": normalized_txt_path,
-                "corrected_text": corrected_text
-            }
-            new_samples_list.append(new_sample)
+            corrected_text = ""
+            if os.path.exists(txt_path):
+                try:
+                    with open(txt_path, "r", encoding="utf-8") as tf:
+                        corrected_text = tf.read().strip()
+                except Exception as e:
+                    log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({txt_path})", e)
 
-    # 3. 데이터 업데이트 반영
+            new_samples_list.append({"txt_path": str(txt_path), "corrected_text": corrected_text})
+    else:
+        for wav in wav_files:
+            base_name = os.path.splitext(wav)[0]
+            txt_path = os.path.join(folder_path_str, f"{base_name}.txt")
+            
+            corrected_text = ""
+            if os.path.exists(txt_path):
+                try:
+                    with open(txt_path, "r", encoding="utf-8") as tf:
+                        corrected_text = tf.read().strip()
+                except Exception as e:
+                    log_error(MODULE_NAME, f"텍스트 파일 읽기 실패 ({txt_path})", e)
+
+            normalized_txt_path = str(txt_path)
+
+            if normalized_txt_path in existing_samples_map:
+                sample_item = existing_samples_map[normalized_txt_path]
+                sample_item["corrected_text"] = corrected_text
+                new_samples_list.append(sample_item)
+            else:
+                new_sample = {
+                    "txt_path": normalized_txt_path,
+                    "corrected_text": corrected_text
+                }
+                new_samples_list.append(new_sample)
+
+    # source_folder 리스트 관리: 기존 목록에 새 폴더가 없으면 추가 (중복 방지)
+    if folder_path_str not in existing_source_folders:
+        existing_source_folders.append(folder_path_str)
+
     algo_data["samples"] = new_samples_list
     algo_data["overall_embedding"] = overall_embedding.tolist()
-    algo_data["source_folder"] = folder_path_str
+    algo_data["source_folder"] = existing_source_folders if len(existing_source_folders) > 1 else existing_source_folders[0] if existing_source_folders else folder_path_str
 
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -525,20 +636,26 @@ def get_chatbot_texts_from_source_folder(algo_name):
             if texts:
                 return texts
 
-        source_folder = algo_data.get("source_folder")
-        if not source_folder or not os.path.exists(source_folder):
-            return texts
+        source_folders = algo_data.get("source_folder")
+        if isinstance(source_folders, str):
+            source_folders = [source_folders]
+        elif not isinstance(source_folders, list):
+            source_folders = []
 
-        for file_name in os.listdir(source_folder):
-            if file_name.endswith(".txt"):
-                txt_file_path = os.path.join(source_folder, file_name)
-                try:
-                    with open(txt_file_path, "r", encoding="utf-8") as tf:
-                        content = tf.read().strip()
-                        if content:
-                            texts.append(content)
-                except Exception:
-                    pass
+        for source_folder in source_folders:
+            if not source_folder or not os.path.exists(source_folder):
+                continue
+
+            for file_name in os.listdir(source_folder):
+                if file_name.endswith(".txt"):
+                    txt_file_path = os.path.join(source_folder, file_name)
+                    try:
+                        with open(txt_file_path, "r", encoding="utf-8") as tf:
+                            content = tf.read().strip()
+                            if content:
+                                texts.append(content)
+                    except Exception:
+                        pass
                     
     except Exception:
         pass

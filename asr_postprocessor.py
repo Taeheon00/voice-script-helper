@@ -8,7 +8,7 @@ try:
 except ImportError as e:
     kiwi = None
 
-# 표준 공통 에러 로거 연동
+# 표준 공통 에러 로ガー 연동
 from error_logger import log_error, log_info
 
 MODULE_NAME = "ASRPostProcessorAdvanced"
@@ -78,6 +78,18 @@ def normalize_korean_numbers_strict(text):
 
     text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구십]+)\s*대(?=[가-힣]|\s|,|\.|$)', replace_decade, text)
 
+    # 2. '천' 단위 이상 큰 단위(천, 만, 억, 조)는 글자를 살림 (예: 삼천원 -> 3천원, 오만오천원 -> 5만5천원)
+    def replace_thousand_unit(match):
+        kor_num = match.group(1)  # 예: '삼'
+        suffix = match.group(2)   # 예: '원' 등
+        try:
+            num_str = kor_to_num_map.get(kor_num, kor_num)
+            return f"{num_str}천{suffix}"
+        except Exception:
+            return match.group(0)
+
+    text = re.sub(r'(?<![가-힣])([일이삼사오육칠팔구])\s*천\s*(원|개|개인|명|가지)?(?=[가-힣]|\s|,|\.|$)', replace_thousand_unit, text)
+
     def replace_general_compound_number(match):
         kor_part = match.group(0)
         try:
@@ -120,6 +132,7 @@ def normalize_korean_numbers_strict(text):
     pattern_unit = r'(?<![가-힣])(?!사\s*인)([일이삼사오육칠팔구십]+)\s*(일부터|일까지|일도|일에|일|원|인|종|개|구매|시|분|초)(?=[가-힣]|\s|,|\.|$)'
     text = re.sub(pattern_unit, replace_day_or_unit, text)
 
+    # 3. 백원 단위 이하 및 기타 큰 단위(만, 억, 조)는 '천'을 제외하고 숫자로 온전히 변환 (예: 삼백원 -> 300원)
     def replace_large_num(match):
         chunk = match.group(0)
         if not any(unit in chunk for unit in ['조', '억', '만', '천', '백']):
@@ -127,6 +140,8 @@ def normalize_korean_numbers_strict(text):
             
         result = chunk
         for kor, num in kor_to_num_map.items():
+            if kor == '천': 
+                continue # '천'만 글자를 유지('3천원')하고, '백'이나 '만' 등은 숫자로 풀어서 변환
             result = result.replace(kor, num)
         return result
 
@@ -170,7 +185,6 @@ def apply_algorithm_text_correction(text, mapped_speaker):
     return text
 
 
-# [핵심] 기존 상위 호출부가 완벽하게 인식하는 원래의 인자 구조 복원
 def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mapped_speaker=None):
     try:
         if not chunk_text:
@@ -184,7 +198,6 @@ def process_segment_text(chunk_text, recent_texts=None, current_start=0.0, mappe
         if not raw_text:
             return ""
 
-        # 전달된 화자 알고리즘 규칙 적용
         if mapped_speaker:
             raw_text = apply_algorithm_text_correction(raw_text, mapped_speaker)
             raw_text = normalize_korean_numbers_strict(raw_text)
