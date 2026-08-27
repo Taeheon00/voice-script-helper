@@ -846,7 +846,7 @@ def run_data_refinement_webui():
                     return msg
                 success = ah.register_dataset_from_refined_folder(target_name, os.path.dirname(first_txt_path))
                 if success: return f"[🎉 성공] '{target_name}' 화자 알고리즘 등록 완료!"
-                msg = "[오류] 등록 처리 중 문제가 발생했습니다."
+                msg = "[경고] 기존 알고리즘 화자와 일치하지 않습니다."
                 log_error(MODULE_NAME, f"알고리즘 등록 실패: {target_name} - {msg}")
                 return msg
             except Exception as e:
