@@ -228,7 +228,7 @@ def record_and_transcribe(model=None):
                 db = current_db[0]
                 normalized_val = min(max((db + 60.0) / 60.0, 0.0), 1.0) if db > -59.0 else 0.0
                 active_blocks = int(normalized_val * 20)
-                gauge = "█" * active_blocks + "-" * (20 - active_blocks)
+                gauge = "█" * active_blocks + " " * (20 - active_blocks)
 
                 time_str = ap.format_time(elapsed_total) if ap and hasattr(ap, 'format_time') else f"{int(elapsed_total)}초"
                 try:
